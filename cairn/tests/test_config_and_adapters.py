@@ -34,6 +34,37 @@ def test_dispatch_config_defaults_worker_healthcheck_and_rejects_unknown_mode() 
         DispatchConfig.model_validate(payload)
 
 
+def test_runtime_heartbeat_grace_is_bounded() -> None:
+    payload = make_config().model_dump()
+    payload["runtime"]["heartbeat_failure_grace"] = 90
+
+    runtime = DispatchConfig.model_validate(payload).runtime
+
+    assert runtime.heartbeat_failure_grace == 90
+
+    payload["runtime"]["heartbeat_failure_grace"] = payload["runtime"]["interval"]
+    with pytest.raises(ValidationError, match="heartbeat_failure_grace must be greater than interval"):
+        DispatchConfig.model_validate(payload)
+
+    payload = make_config().model_dump()
+    payload["runtime"].update(
+        {"project_timeout": 14_400, "heartbeat_failure_grace": 90, "server_lease_timeout": 120}
+    )
+    runtime = DispatchConfig.model_validate(payload).runtime
+    assert runtime.project_timeout == 14_400
+    assert runtime.server_lease_timeout == 120
+
+    payload["runtime"]["server_lease_timeout"] = 90
+    with pytest.raises(ValidationError, match="server_lease_timeout must be greater"):
+        DispatchConfig.model_validate(payload)
+
+    payload = make_config().model_dump()
+    payload["runtime"].pop("heartbeat_failure_grace")
+    payload["runtime"]["server_lease_timeout"] = payload["runtime"]["interval"] * 2
+    with pytest.raises(ValidationError, match="server_lease_timeout must be greater"):
+        DispatchConfig.model_validate(payload)
+
+
 def test_dispatch_config_rejects_duplicate_workers_and_excess_project_parallelism() -> None:
     payload = make_config().model_dump()
     payload["workers"].append(dict(payload["workers"][0]))
@@ -99,6 +130,7 @@ def test_pi_driver_models_json_and_execute_argv_include_context_window_and_tools
                 "PI_API_KEY": "secret",
                 "PI_PROVIDER_API": "openai-completions",
                 "PI_MODEL_CONTEXT_WINDOW": "131072",
+                "PI_REASONING_EFFORT": "medium",
             },
         }
     )
@@ -108,7 +140,28 @@ def test_pi_driver_models_json_and_execute_argv_include_context_window_and_tools
 
     assert models["providers"]["cairn"]["models"][0]["contextWindow"] == 131072
     assert "--tools" in result.argv
+    assert result.argv[result.argv.index("--thinking") + 1] == "medium"
     assert result.argv[-2:] == ["-p", "prompt"]
+
+
+def test_pi_driver_does_not_force_thinking_when_unconfigured() -> None:
+    worker = WorkerConfig.model_validate(
+        {
+            "name": "pi-worker",
+            "type": "pi",
+            "task_types": ["explore"],
+            "max_running": 1,
+            "priority": 0,
+            "env": {
+                "PI_MODEL": "model",
+                "PI_BASE_URL": "http://api",
+                "PI_API_KEY": "secret",
+                "PI_PROVIDER_API": "openai-completions",
+            },
+        }
+    )
+
+    assert "--thinking" not in PiDriver().build_execute(worker, "prompt", None).argv
 
 
 def test_codex_driver_execute_argv_passes_model_endpoint_and_prompt() -> None:

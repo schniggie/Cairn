@@ -171,6 +171,18 @@ class RuntimeConfig(BaseModel):
     worker_healthcheck: WorkerHealthcheckMode = "startup_only"
     execution: ExecutionMode = "container"
     prompt_group: str = Field(min_length=1)
+    project_timeout: int | None = Field(default=None, gt=0)
+    server_lease_timeout: int | None = Field(default=None, gt=0)
+    heartbeat_failure_grace: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_heartbeat_grace(self) -> "RuntimeConfig":
+        if self.heartbeat_failure_grace is not None and self.heartbeat_failure_grace <= self.interval:
+            raise ValueError("heartbeat_failure_grace must be greater than interval")
+        effective_grace = self.heartbeat_failure_grace or self.interval * 2
+        if self.server_lease_timeout is not None and self.server_lease_timeout <= effective_grace:
+            raise ValueError("server_lease_timeout must be greater than heartbeat_failure_grace")
+        return self
 
 
 class WorkerConfig(BaseModel):

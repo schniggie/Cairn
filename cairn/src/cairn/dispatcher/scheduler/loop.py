@@ -4,6 +4,7 @@ import logging
 import shutil
 import subprocess
 import time
+from datetime import datetime, timezone
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -88,6 +89,7 @@ class DispatcherLoop:
                     self._reap_futures()
                     self._reap_cleanup_futures()
                     summaries = self.client.list_projects()
+                    self._expire_project_timeouts(summaries)
                     self._initialize_reason_checkpoints(summaries)
                     self._refresh_runtime_projects(summaries)
                     self._cancel_inactive_tasks(summaries)
@@ -842,6 +844,32 @@ class DispatcherLoop:
             if current_status != status:
                 self._inactive_cleanup_done.pop(project_id, None)
 
+    def _expire_project_timeouts(self, summaries: list[ProjectSummary]) -> None:
+        timeout = self.config.runtime.project_timeout
+        if timeout is None:
+            return
+        now = datetime.now(timezone.utc)
+        for summary in summaries:
+            if summary.status != "active" or summary.started_at is None:
+                continue
+            started_at = datetime.fromisoformat(summary.started_at.replace("Z", "+00:00")).astimezone(
+                timezone.utc
+            )
+            if (now - started_at).total_seconds() < timeout:
+                continue
+            response = self.client.update_project_status(summary.id, "stopped")
+            if not response.ok:
+                LOG.warning(
+                    "project timeout stop failed project=%s status=%s timeout=%ss",
+                    summary.id, response.status_code, timeout,
+                )
+                continue
+            summary.status = "stopped"
+            LOG.warning(
+                "project wall timeout reached project=%s started_at=%s timeout=%ss",
+                summary.id, started_at.isoformat(), timeout,
+            )
+
     def _cancel_inactive_tasks(self, summaries: list[ProjectSummary]) -> None:
         status_by_project = {summary.id: summary.status for summary in summaries}
         for task in self.futures.values():
@@ -904,28 +932,25 @@ class DispatcherLoop:
                 self._log_state.pop(scope, None)
 
     def _validate_server_settings(self) -> None:
-        settings = self.client.get_settings()
+        configured_timeout = self.config.runtime.server_lease_timeout
+        settings = (
+            self.client.update_settings(configured_timeout)
+            if configured_timeout is not None
+            else self.client.get_settings()
+        )
         interval = self.config.runtime.interval
+        effective_grace = self.config.runtime.heartbeat_failure_grace or interval * 2
         for name, value in (("intent_timeout", settings.intent_timeout), ("reason_timeout", settings.reason_timeout)):
-            if value <= interval:
+            if value <= effective_grace:
                 raise RuntimeError(
-                    f"server {name}={value}s must be greater than dispatcher interval={interval}s"
+                    f"server {name}={value}s must be greater than heartbeat failure grace={effective_grace}s"
                 )
-            if value < interval * 2:
-                LOG.warning(
-                    "server %s is tight %s=%ss interval=%ss; heartbeat slack is only %ss",
-                    name,
-                    name,
-                    value,
-                    interval,
-                    value - interval,
-                )
-                continue
             LOG.info(
-                "server setting validated %s=%ss interval=%ss",
+                "server setting validated %s=%ss interval=%ss grace=%ss",
                 name,
                 value,
                 interval,
+                effective_grace,
             )
 
     def _run_startup_healthchecks(self, *, show_commands: bool) -> None:

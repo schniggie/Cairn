@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from concurrent.futures import Future
+from datetime import datetime, timezone
+
+import pytest
 
 from cairn.dispatcher.models import ReasonCheckpoint, RunningTask
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
@@ -32,6 +35,7 @@ def _summary(project_id: str, status: str) -> ProjectSummary:
         status=status,
         bootstrap_enabled=True,
         created_at="2026-01-01T00:00:00Z",
+        started_at=None,
         fact_count=2,
         intent_count=0,
         working_intent_count=0,
@@ -257,6 +261,38 @@ def test_cancel_inactive_tasks_marks_stopped_and_deleted_projects() -> None:
     assert deleted.reason == "deleted"
 
 
+def test_project_timeout_uses_first_persisted_intent_and_stops_project(monkeypatch) -> None:
+    loop = _loop()
+    config = make_config()
+    loop.config = config.model_copy(
+        update={"runtime": config.runtime.model_copy(update={"project_timeout": 3600})}
+    )
+    updates: list[tuple[str, str]] = []
+    loop.client = type(
+        "Client",
+        (),
+        {
+            "update_project_status": lambda _self, project_id, status: (
+                updates.append((project_id, status)) or type("Result", (), {"ok": True})()
+            ),
+        },
+    )()
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr("cairn.dispatcher.scheduler.loop.datetime", FrozenDateTime)
+    summary = _summary("proj_001", "active")
+    summary.started_at = "2026-01-01T08:00:00Z"
+
+    loop._expire_project_timeouts([summary])
+
+    assert updates == [("proj_001", "stopped")]
+    assert summary.status == "stopped"
+
+
 def test_initialize_reason_checkpoint_only_for_active_projects_with_open_intents() -> None:
     loop = _loop()
     active = _summary("active", "active")
@@ -331,3 +367,46 @@ def test_startup_only_worker_healthcheck_runs_automatic_startup_check() -> None:
     loop.run_startup_healthchecks()
 
     assert calls == [False]
+
+
+def test_validate_server_settings_applies_configured_lease_timeout() -> None:
+    loop = _loop()
+    config = make_config()
+    loop.config = config.model_copy(
+        update={
+            "runtime": config.runtime.model_copy(
+                update={"heartbeat_failure_grace": 90, "server_lease_timeout": 120}
+            )
+        }
+    )
+    calls: list[int] = []
+    loop.client = type(
+        "Client",
+        (),
+        {
+            "update_settings": lambda _self, timeout: (
+                calls.append(timeout)
+                or type("Settings", (), {"intent_timeout": timeout, "reason_timeout": timeout})()
+            )
+        },
+    )()
+
+    loop._validate_server_settings()
+
+    assert calls == [120]
+
+
+def test_validate_server_settings_rejects_lease_shorter_than_heartbeat_grace() -> None:
+    loop = _loop()
+    config = make_config()
+    loop.config = config.model_copy(
+        update={"runtime": config.runtime.model_copy(update={"heartbeat_failure_grace": 90})}
+    )
+    loop.client = type(
+        "Client",
+        (),
+        {"get_settings": lambda _self: type("Settings", (), {"intent_timeout": 15, "reason_timeout": 15})()},
+    )()
+
+    with pytest.raises(RuntimeError, match="heartbeat failure grace=90s"):
+        loop._validate_server_settings()
