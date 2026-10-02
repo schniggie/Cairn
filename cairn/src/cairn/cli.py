@@ -75,3 +75,24 @@ def dispatch(config_path: Path, once: bool, startup_healthcheck_only: bool, log_
         loop.run(once=once)
     except RuntimeError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+@main.command()
+@click.option(
+    "--server",
+    default="http://127.0.0.1:8000",
+    show_default=True,
+    help="Cairn server base URL",
+)
+@click.option("--once", is_flag=True, help="Run one poll round and exit")
+@click.option("--log-level", default="INFO", show_default=True, help="Log level")
+def ctf_bridge(server: str, once: bool, log_level: str):
+    """Run the CTF platform bridge."""
+    configure_logging(log_level)
+    from cairn.ctfbridge.bridge import CtfBridge
+
+    bridge = CtfBridge(server)
+    if once:
+        bridge.run_once()
+    else:
+        bridge.run()

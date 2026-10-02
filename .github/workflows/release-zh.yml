@@ -1,0 +1,118 @@
+name: Build And Release Chinese Edition (zh)
+
+# 自动构建 Cairn 中文版发行包并发布到 GitHub Release。
+#
+# 触发方式（任一）：
+#   1) 推送 tag  vX.Y.Z-zh  （例如 v0.2.1-zh、v0.3.0-zh）→ 自动构建并发布
+#   2) 手动运行 workflow_dispatch，填写版本号（例如 0.2.1）→ 生成 tag v0.2.1-zh 并发布
+#
+# 产物：
+#   - cairn-zh-CN-<版本>.zip   中文独立增量包（装到原版即可切换中文）
+#   - Cairn-<版本>-zh.zip     完整中文版整包
+#
+# 版本解析约定：tag 形如 v<版本>-zh；Release tag = v<版本>-zh。
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（不含 v，例如 0.2.1）。将生成 tag v0.2.1-zh"
+        required: true
+  push:
+    tags:
+      - "v*-zh"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+            VERSION="${VERSION#v}"
+            VERSION="${VERSION%-zh}"
+          else
+            VERSION="${{ github.event.inputs.version }}"
+          fi
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::invalid version '${VERSION}' (expected e.g. 0.2.1)"
+            exit 1
+          fi
+          echo "version=${VERSION}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build delta package (zh-CN add-on)
+        id: delta
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          DELTA="cairn-zh-CN-${V}.zip"
+          mkdir -p "build/delta/files/cairn/src/cairn/dispatcher/prompts/zh-CN"
+          mkdir -p "build/delta/files/cairn/src/cairn/server/static"
+          cp "cairn/src/cairn/dispatcher/prompts/zh-CN/"*.md \
+             "build/delta/files/cairn/src/cairn/dispatcher/prompts/zh-CN/"
+          cp "cairn/src/cairn/server/static/index.html" \
+             "build/delta/files/cairn/src/cairn/server/static/"
+          sed "s/{{VERSION}}/${V}/g" packaging/zh-CN/install.sh > build/delta/install.sh
+          sed "s/{{VERSION}}/${V}/g" packaging/zh-CN/README-zh-CN.md > build/delta/README-zh-CN.md
+          chmod +x build/delta/install.sh
+          (cd build/delta && zip -qr "../../${DELTA}" .)
+          ls -la "${DELTA}"
+          echo "file=${DELTA}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build full archive
+        id: full
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          FULL="Cairn-${V}-zh.zip"
+          mkdir -p build/full
+          git archive --format=tar HEAD | tar -x -C build/full
+          rm -rf build/full/dist          # 仓库内的历史构建产物不入整包
+          (cd build/full && zip -qr "../../${FULL}" .)
+          ls -la "${FULL}"
+          echo "file=${FULL}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create or update release
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          TAG="v${V}-zh"
+          DELTA="${{ steps.delta.outputs.file }}"
+          FULL="${{ steps.full.outputs.file }}"
+          sed "s/{{VERSION}}/${V}/g" packaging/zh-CN/release-notes.md > /tmp/release-notes.md
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "[*] release ${TAG} 已存在，覆盖上传资产并更新说明"
+            gh release upload "${TAG}" "${DELTA}" "${FULL}" \
+              --clobber --repo "${GITHUB_REPOSITORY}"
+            gh release edit "${TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --notes-file /tmp/release-notes.md
+          else
+            echo "[*] 创建 release ${TAG}"
+            gh release create "${TAG}" "${DELTA}" "${FULL}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Cairn 中文版 ${V} (zh)" \
+              --notes-file /tmp/release-notes.md
+          fi
+
+      - name: Verify release assets
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          TAG="v${V}-zh"
+          gh release view "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json tagName,assets --jq \
+            '{tag: .tagName, assets: [.assets[] | .name]}'

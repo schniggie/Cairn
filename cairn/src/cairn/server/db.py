@@ -147,6 +147,55 @@ CREATE TABLE IF NOT EXISTS http_records (
 
 CREATE INDEX IF NOT EXISTS idx_http_records_project_created
 ON http_records(project_id, created_at);
+
+CREATE TABLE IF NOT EXISTS ctf_config (
+    mode TEXT NOT NULL DEFAULT 'manual',
+    adapter TEXT NOT NULL DEFAULT 'ctfd',
+    base_url TEXT NOT NULL DEFAULT '',
+    token TEXT NOT NULL DEFAULT '',
+    team_name TEXT NOT NULL DEFAULT '',
+    flag_regex TEXT NOT NULL DEFAULT '(?:DASCTF|flag)\\{[^}]+\\}',
+    auto_submit INTEGER NOT NULL DEFAULT 1,
+    max_concurrent INTEGER NOT NULL DEFAULT 2,
+    poll_interval INTEGER NOT NULL DEFAULT 10,
+    env_poll_interval INTEGER NOT NULL DEFAULT 5,
+    env_timeout INTEGER NOT NULL DEFAULT 180,
+    submission_max_retries INTEGER NOT NULL DEFAULT 5,
+    rate_limit_backoff INTEGER NOT NULL DEFAULT 30,
+    model_base_url TEXT NOT NULL DEFAULT '',
+    model_name TEXT NOT NULL DEFAULT '',
+    model_api_key TEXT NOT NULL DEFAULT '',
+    last_model_error TEXT,
+    model_health_at TEXT,
+    last_sync_at TEXT,
+    bridge_heartbeat_at TEXT,
+    bridge_error TEXT,
+    sync_requested INTEGER NOT NULL DEFAULT 0,
+    budget_easy INTEGER NOT NULL DEFAULT 12,
+    budget_medium INTEGER NOT NULL DEFAULT 25,
+    budget_hard INTEGER NOT NULL DEFAULT 40
+);
+
+INSERT OR IGNORE INTO ctf_config (rowid) VALUES (1);
+
+CREATE TABLE IF NOT EXISTS ctf_challenges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    external_id TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT '',
+    points INTEGER NOT NULL DEFAULT 0,
+    description TEXT NOT NULL DEFAULT '',
+    target TEXT NOT NULL DEFAULT '',
+    attachments TEXT NOT NULL DEFAULT '[]',
+    hints TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'queued',
+    project_id TEXT,
+    last_flag TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    needs_refresh INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -160,6 +209,7 @@ def configure(path: Path) -> None:
         conn.executescript(SCHEMA)
         _ensure_project_columns(conn)
         _ensure_intent_columns(conn)
+        _ensure_ctf_columns(conn)
 
 
 def _ensure_project_columns(conn: sqlite3.Connection) -> None:
@@ -192,6 +242,41 @@ def _ensure_intent_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE intents ADD COLUMN concluded_as TEXT")
     if "retry_count" not in columns:
         conn.execute("ALTER TABLE intents ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
+
+
+def _ensure_ctf_columns(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ctf_config'"
+    ).fetchall()
+    if rows:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(ctf_config)")}
+        for column, ddl in (
+            ("sync_requested", "ALTER TABLE ctf_config ADD COLUMN sync_requested INTEGER NOT NULL DEFAULT 0"),
+            ("bridge_heartbeat_at", "ALTER TABLE ctf_config ADD COLUMN bridge_heartbeat_at TEXT"),
+            ("bridge_error", "ALTER TABLE ctf_config ADD COLUMN bridge_error TEXT"),
+            ("env_poll_interval", "ALTER TABLE ctf_config ADD COLUMN env_poll_interval INTEGER NOT NULL DEFAULT 5"),
+            ("env_timeout", "ALTER TABLE ctf_config ADD COLUMN env_timeout INTEGER NOT NULL DEFAULT 180"),
+            ("submission_max_retries", "ALTER TABLE ctf_config ADD COLUMN submission_max_retries INTEGER NOT NULL DEFAULT 5"),
+            ("rate_limit_backoff", "ALTER TABLE ctf_config ADD COLUMN rate_limit_backoff INTEGER NOT NULL DEFAULT 30"),
+            ("model_base_url", "ALTER TABLE ctf_config ADD COLUMN model_base_url TEXT NOT NULL DEFAULT ''"),
+            ("model_name", "ALTER TABLE ctf_config ADD COLUMN model_name TEXT NOT NULL DEFAULT ''"),
+            ("model_api_key", "ALTER TABLE ctf_config ADD COLUMN model_api_key TEXT NOT NULL DEFAULT ''"),
+            ("last_model_error", "ALTER TABLE ctf_config ADD COLUMN last_model_error TEXT"),
+            ("model_health_at", "ALTER TABLE ctf_config ADD COLUMN model_health_at TEXT"),
+            ("budget_easy", "ALTER TABLE ctf_config ADD COLUMN budget_easy INTEGER NOT NULL DEFAULT 12"),
+            ("budget_medium", "ALTER TABLE ctf_config ADD COLUMN budget_medium INTEGER NOT NULL DEFAULT 25"),
+            ("budget_hard", "ALTER TABLE ctf_config ADD COLUMN budget_hard INTEGER NOT NULL DEFAULT 40"),
+        ):
+            if column not in columns:
+                conn.execute(ddl)
+
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ctf_challenges'"
+    ).fetchall()
+    if rows:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(ctf_challenges)")}
+        if "needs_refresh" not in columns:
+            conn.execute("ALTER TABLE ctf_challenges ADD COLUMN needs_refresh INTEGER NOT NULL DEFAULT 0")
 
 
 @contextmanager

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -427,3 +428,111 @@ class UpdateDispatchConfigRequest(BaseModel):
         if not value.strip():
             raise ValueError("yaml must not be empty")
         return value
+
+
+class CtfMode(str, Enum):
+    MANUAL = "manual"
+    CTF = "ctf"
+
+
+class CtfConfig(BaseModel):
+    mode: CtfMode = CtfMode.MANUAL
+    adapter: str = "ctfd"
+    base_url: str = ""
+    token: str = ""
+    team_name: str = ""
+    flag_regex: str = "flag\\{[^}]+\\}"
+    auto_submit: bool = True
+    max_concurrent: int = Field(default=2, ge=1, le=32)
+    poll_interval: int = Field(default=10, ge=3, le=3600)
+    env_poll_interval: int = Field(default=5, ge=1, le=300)
+    env_timeout: int = Field(default=180, ge=10, le=3600)
+    submission_max_retries: int = Field(default=5, ge=1, le=50)
+    rate_limit_backoff: int = Field(default=30, ge=1, le=3600)
+    model_base_url: str = ""
+    model_name: str = ""
+    model_api_key: str = ""
+    last_model_error: str | None = None
+    model_health_at: str | None = None
+    budget_easy: int = Field(default=12, ge=1, le=10000)
+    budget_medium: int = Field(default=25, ge=1, le=10000)
+    budget_hard: int = Field(default=40, ge=1, le=10000)
+    last_sync_at: str | None = None
+    bridge_heartbeat_at: str | None = None
+    bridge_error: str | None = None
+    sync_requested: bool = False
+
+
+class CtfConfigUpdate(BaseModel):
+    adapter: str | None = None
+    base_url: str | None = None
+    token: str | None = None
+    team_name: str | None = None
+    flag_regex: str | None = None
+    auto_submit: bool | None = None
+    max_concurrent: int | None = Field(default=None, ge=1, le=32)
+    poll_interval: int | None = Field(default=None, ge=3, le=3600)
+    env_poll_interval: int | None = Field(default=None, ge=1, le=300)
+    env_timeout: int | None = Field(default=None, ge=10, le=3600)
+    submission_max_retries: int | None = Field(default=None, ge=1, le=50)
+    rate_limit_backoff: int | None = Field(default=None, ge=1, le=3600)
+    model_base_url: str | None = None
+    model_name: str | None = None
+    model_api_key: str | None = None
+    budget_easy: int | None = Field(default=None, ge=1, le=10000)
+    budget_medium: int | None = Field(default=None, ge=1, le=10000)
+    budget_hard: int | None = Field(default=None, ge=1, le=10000)
+
+    @field_validator("adapter", "base_url", "team_name", "flag_regex", "model_base_url", "model_name")
+    @classmethod
+    def validate_text_fields(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip()
+
+
+class CtfModeRequest(BaseModel):
+    mode: CtfMode
+
+
+class CtfChallenge(BaseModel):
+    id: int
+    external_id: str
+    title: str
+    category: str = ""
+    points: int = 0
+    description: str = ""
+    target: str = ""
+    attachments: list[str] = []
+    hints: list[str] = []
+    status: str = "queued"
+    project_id: str | None = None
+    last_flag: str | None = None
+    attempt_count: int = 0
+    needs_refresh: bool = False
+    created_at: str
+    updated_at: str
+
+
+class CtfSubmitRequest(BaseModel):
+    challenge_id: str
+    flag: str
+
+    @field_validator("challenge_id", "flag")
+    @classmethod
+    def validate_non_empty_text(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be empty")
+        return text
+
+
+class CtfHeartbeatRequest(BaseModel):
+    error: str | None = None
+    model_ok: bool | None = None
+    model_error: str | None = None
+
+
+class CtfTestResult(BaseModel):
+    ok: bool
+    detail: str
