@@ -1,6 +1,12 @@
 # Cairn server API endpoint.
 server: "http://cairn-server:8000"
 
+# Optional Pi preflight. Leave disabled unless both processes share CAIRN_SAFETY_TOKEN.
+safety:
+  enabled: false
+  endpoint: "http://cairn-server:8000/internal/safety"
+  token_env: "CAIRN_SAFETY_TOKEN"
+
 # Shared environment variables merged into every worker.
 common_env:
   TSEC_SERVER_HOST: "<SERVER_HOST>:8000"

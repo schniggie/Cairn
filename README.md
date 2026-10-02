@@ -108,7 +108,7 @@ System architecture:
 
 Workers can also run directly on the dispatcher host instead of in per-project containers — **local mode**, no Docker required. See [Local mode](#local-mode-no-docker) below.
 
-Supported worker backends: **Claude Code**, **Codex**, and **Pi**.
+Supported worker backends: **Claude Code**, **Codex**, and **Pi**. Pi can optionally load a packaged safety extension; see [Pi safety boundary](#pi-safety-boundary).
 
 ## Results
 
@@ -229,3 +229,12 @@ This project is licensed under **GNU AGPLv3** for personal and educational use.
 **Commercial Use**: If you wish to use this project in a commercial or proprietary environment without the AGPL-3.0 open-source obligations, **please contact me to obtain a commercial license.**
 
 **Contributions**: By submitting a Pull Request, you agree that your contributions may be used under both the AGPL-3.0 and the project's commercial license.
+
+
+## Pi safety boundary
+
+When `safety.enabled` is set, Pi workers load one packaged, trusted extension and keep automatic extension discovery disabled. Every proposed tool call is sent to the server preflight endpoint. Explicit high-confidence destructive patterns are blocked, resource-heavy or over-budget credential validation is paused, and ambiguous actions remain available and audited. Claude Code, Codex, and mock workers are unchanged; omit the `safety` block to keep the previous behavior.
+
+The server commits the decision before Pi receives a block whenever it is reachable. A destructive block closes only the current Intent with a `[V1][BRANCH_CLOSED]` Fact. A resource pause closes only the current Intent with an `[R1][RESOURCE_PAUSED]` Fact and is not vulnerability confirmation. Other project directions continue normally.
+
+The web export dialog includes an Audit tab showing proposal, decision, rule, execution result, assistant messages, correlation IDs, truncation state, and payload hash. Container mode is the stronger enforcement boundary; local mode is best-effort because Pi runs with the dispatcher's user permissions. Export `CAIRN_SAFETY_TOKEN` for both the server and the dispatcher. See `docs/specs/pi-only-safety-mvp.md`.

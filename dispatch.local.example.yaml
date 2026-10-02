@@ -15,6 +15,12 @@
 
 server: "http://127.0.0.1:8000"
 
+# Optional Pi preflight. Set enabled: true and export CAIRN_SAFETY_TOKEN in both shells.
+safety:
+  enabled: false
+  endpoint: "http://127.0.0.1:8000/internal/safety"
+  token_env: "CAIRN_SAFETY_TOKEN"
+
 runtime:
   execution: local            # run workers as host processes instead of per-project containers
   worker_healthcheck: disabled  # no base_url to probe; startup instead checks the CLIs are on PATH

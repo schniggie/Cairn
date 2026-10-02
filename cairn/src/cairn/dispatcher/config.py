@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 import json
 from importlib import resources
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -16,6 +17,16 @@ CompletedAction = Literal["remove", "stop"]
 WorkerHealthcheckMode = Literal["startup_and_task", "startup_only", "disabled"]
 ExecutionMode = Literal["container", "local"]
 LocalCompletedAction = Literal["keep", "remove"]
+
+RESERVED_RUNTIME_ENV_KEYS = frozenset(
+    {
+        "CAIRN_PROJECT_ID",
+        "CAIRN_INTENT_ID",
+        "CAIRN_RUN_ID",
+        "CAIRN_WORKER",
+        "CAIRN_PHASE",
+    }
+)
 
 WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
     "claudecode": (
@@ -40,9 +51,9 @@ WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
 DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
     "reason.md": ("{graph_yaml}", "{fact_ids}", "{open_intents}", "{max_intents}"),
     "explore.md": ("{graph_yaml}", "{intent_id}", "{intent_description}"),
-    "explore_conclude.md": ("{graph_yaml}", "{intent_id}", "{intent_description}"),
+    "explore_conclude.md": ("{graph_yaml}", "{intent_id}", "{intent_description}", "{safety_decision_context}"),
     "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
-    "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}"),
+    "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}", "{safety_decision_context}"),
 }
 
 PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
@@ -185,6 +196,29 @@ class RuntimeConfig(BaseModel):
         return self
 
 
+class ResourceBudgetConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_bulk_concurrency: int = Field(default=2, ge=1, le=2)
+    max_unattended_bulk_seconds: int = Field(default=600, ge=30, le=600)
+    auth_concurrency: int = Field(default=1, ge=1, le=1)
+    auth_attempts_per_minute: int = Field(default=10, ge=1, le=10)
+    auth_attempts_per_batch: int = Field(default=30, ge=1, le=30)
+
+
+class SafetyConfig(BaseModel):
+    """Optional Pi preflight. Other worker types keep running when this block is absent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    endpoint: str = Field(min_length=1)
+    token_env: str = Field(default="CAIRN_SAFETY_TOKEN", min_length=1)
+    request_timeout_ms: int = Field(default=2000, ge=100, le=10000)
+    max_payload_bytes: int = Field(default=65536, ge=4096, le=1048576)
+    resource_budget: ResourceBudgetConfig = Field(default_factory=ResourceBudgetConfig)
+
+
 class WorkerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -224,6 +258,7 @@ class DispatchConfig(BaseModel):
     tasks: TasksConfig
     container: ContainerConfig | None = None
     local: LocalConfig | None = None
+    safety: SafetyConfig | None = None
     common_env: dict[str, str] = Field(default_factory=dict)
     workers: list[WorkerConfig]
 
@@ -238,6 +273,16 @@ class DispatchConfig(BaseModel):
         workers = data.get("workers")
         if not isinstance(common_env, dict) or not isinstance(workers, list):
             return data
+
+        reserved = {key for key in common_env if _is_reserved_safety_env(key)}
+        for worker in workers:
+            if not isinstance(worker, dict):
+                continue
+            worker_env = worker.get("env")
+            if isinstance(worker_env, dict):
+                reserved.update(key for key in worker_env if _is_reserved_safety_env(key))
+        if reserved:
+            raise ValueError(f"reserved safety env keys are managed by Cairn: {', '.join(sorted(reserved))}")
 
         merged = dict(data)
         merged_workers: list[Any] = []
@@ -301,6 +346,17 @@ def _validate_optional_positive_int_env(worker_name: str, env: dict[str, str], k
         raise ValueError(f"worker {worker_name} env {key} must be an integer") from exc
     if parsed <= 0:
         raise ValueError(f"worker {worker_name} env {key} must be greater than 0")
+
+
+def _is_reserved_safety_env(key: object) -> bool:
+    return isinstance(key, str) and (key.startswith("CAIRN_SAFETY_") or key in RESERVED_RUNTIME_ENV_KEYS)
+
+
+def resolve_safety_token(config: SafetyConfig) -> str:
+    value = os.environ.get(config.token_env, "").strip()
+    if not value:
+        raise ValueError(f"missing safety token environment variable: {config.token_env}")
+    return value
 
 
 def validate_prompt_resources(prompt_group: str) -> None:
