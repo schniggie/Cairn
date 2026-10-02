@@ -125,10 +125,10 @@ The upstream modules are on branch `cursor/spdc-elm-ssh-runtime-1070` under `int
 
 Pick **at most one** alternative. They replace the same core and were not forced together:
 
-| Choice | Branch | What changes if you adopt it |
+| Choice | Pull request | What changes if you adopt it |
 | --- | --- | --- |
-| Goal Gate / IntentRun | `cursor/tu95-goal-gate-1070` | Scheduler and conclude protocol. Vendored, not wired. |
-| SSH + event ledger + migrations | `cursor/spdc-elm-ssh-runtime-1070` | `SCHEMA`, `ContainerManager`, and the dispatcher. Vendored, not wired. |
+| Goal Gate / IntentRun | https://github.com/schniggie/Cairn/pull/3 (`cursor/tu95-goal-gate-1070`) | Scheduler and conclude protocol. Vendored, not wired. |
+| SSH + event ledger + migrations | https://github.com/schniggie/Cairn/pull/2 (`cursor/spdc-elm-ssh-runtime-1070`) | `SCHEMA`, `ContainerManager`, and the dispatcher. Vendored, not wired. |
 
 Merging either alternative PR only adds the upstream source under `integrations/`. It does not switch the running process. A real switch is a follow-up that replaces the core and re-ports the features above. I could not import those runtimes against this schema without that replacement.
 
