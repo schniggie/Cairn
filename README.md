@@ -108,7 +108,7 @@ System architecture:
 
 Workers can also run directly on the dispatcher host instead of in per-project containers — **local mode**, no Docker required. See [Local mode](#local-mode-no-docker) below.
 
-Supported worker backends: **Claude Code**, **Codex**, and **Pi**. Pi can optionally load a packaged safety extension; see [Pi safety boundary](#pi-safety-boundary).
+Supported worker backends: **Claude Code**, **Codex**, **Pi**, and **Gemini CLI**. Pi can optionally load a packaged safety extension; see [Pi safety boundary](#pi-safety-boundary). Gemini uses host CLI authentication and does not resume a conclude session.
 
 ## Results
 
