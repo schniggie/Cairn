@@ -12,10 +12,14 @@ USER kali
 RUN sudo apt update && \
     sudo apt install -y bsdextrautils npm jq iputils-ping sshpass ncat rlwrap \
     bloodyad coercer enum4linux-ng pwncat chisel-common-binaries \
-    dirsearch yq krb5-user gitleaks naabu nikto netexec adb && \
+    dirsearch yq krb5-user gitleaks naabu nikto netexec adb \
+    gdb gdb-multiarch gdbserver ltrace strace && \
     sudo apt clean && \
     sudo rm -rf /var/lib/apt/lists/* && \
-    pip3 install pwntools pymongo --break-system-packages && \
+    python3 -m pip install 'unicorn>=2.0.1.post1' capstone pyelftools requests z3-solver ROPgadget pyserial paramiko intervaltree sortedcontainers colorama packaging pymongo --break-system-packages && \
+    python3 -m pip install pwntools --no-deps --break-system-packages && \
+    python3 -m pip install angr --break-system-packages && \
+    sudo gem install one_gadget || true && \
     sudo npm install -g @playwright/cli@latest && \
     cd /tmp && playwright-cli install
 
@@ -68,6 +72,13 @@ RUN sudo npm install -g @openai/codex@0.118.0
 RUN sudo npm install -g @anthropic-ai/claude-code@2.1.98
 RUN sudo npm install -g @mariozechner/pi-coding-agent@0.73.0
 
+# Ghidra decompiler for reverse-engineering challenges (from LING12138-sg/Cairn).
+RUN cd /tmp && \
+    wget -q "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.3_build/ghidra_12.1.3_PUBLIC_20260817.zip" -O ghidra.zip && \
+    sudo unzip -q ghidra.zip -d /opt && \
+    sudo rm -f ghidra.zip && \
+    sudo chmod -R o+rX /opt/ghidra_12.1.3_PUBLIC
+
 RUN sudo chmod +x /usr/local/bin/kerbrute
 RUN mkdir -p /home/kali/.config/nuclei && \
     echo >> /home/kali/.config/nuclei/config.yaml && \
@@ -85,6 +96,8 @@ ENV PYTHONUNBUFFERED=1
 
 COPY ./.agents /home/kali/workspace/.agents
 COPY ./.agents /home/kali/workspace/.claude
+# Home-level copy: worker cwd is a bind mount, so Claude discovers skills from ~/.claude/skills.
+COPY --chown=kali:kali ./.agents/skills /home/kali/.claude/skills
 COPY ./AGENTS.md /home/kali/workspace/AGENTS.md
 COPY ./AGENTS.md /home/kali/workspace/CLAUDE.md
 

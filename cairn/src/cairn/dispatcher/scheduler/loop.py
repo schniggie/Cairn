@@ -4,15 +4,17 @@ import logging
 import shutil
 import subprocess
 import time
+from datetime import datetime, timezone
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
 import requests
 
+from cairn.dispatcher.auth_control import DispatcherAuthControl
 from cairn.dispatcher.config import DispatchConfig, LocalConfig, WorkerConfig
 from cairn.dispatcher.models import ReasonCheckpoint, RunningTask
-from cairn.dispatcher.protocol.client import CairnClient
+from cairn.dispatcher.protocol.client import CairnClient, ProtocolError
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.local_backend import LocalBackend
@@ -22,6 +24,7 @@ from cairn.dispatcher.workers.registry import get_driver
 from cairn.dispatcher.tasks.bootstrap import run_bootstrap_task
 from cairn.dispatcher.tasks.explore import run_explore_task
 from cairn.dispatcher.tasks.reason import run_reason_task
+from cairn.dispatcher.tasks.verify import run_verify_task
 from cairn.server.models import Intent, ProjectDetail, ProjectSummary
 
 LOG = logging.getLogger(__name__)
@@ -44,12 +47,15 @@ class DispatcherLoop:
     def __init__(self, config_path: Path):
         self.config_path = config_path
         self.config = DispatchConfig.load(config_path)
-        self.client = CairnClient(self.config.server)
+        self.client = CairnClient(self.config.server, server_token=self.config.server_token)
+        self.auth_control = DispatcherAuthControl(self.client, auth_config=self.config.auth)
+        self._override_local: LocalBackend | None = None
+        self._override_container: ContainerManager | None = None
         if self.config.runtime.execution == "local":
-            self.container_manager = LocalBackend(self.config.local or LocalConfig())
+            self.container_manager = LocalBackend(self.config.local or LocalConfig(), self.config.auth)
         else:
             assert self.config.container is not None
-            self.container_manager = ContainerManager(self.config.container)
+            self.container_manager = ContainerManager(self.config.container, self.config.auth)
         self.executor = ThreadPoolExecutor(max_workers=self.config.runtime.max_workers)
         self.cleanup_executor = ThreadPoolExecutor(max_workers=max(1, min(8, self.config.runtime.max_workers)))
         self.futures: dict[Future[str], RunningTask] = {}
@@ -64,6 +70,8 @@ class DispatcherLoop:
         self.project_cursor = 0
         self._settings_checked = False
         self._startup_healthchecks_checked = False
+        self._auth_deployment_checked = False
+        self._config_mtime_ns = self.config_path.stat().st_mtime_ns
 
     def close(self) -> None:
         if self.futures:
@@ -75,19 +83,58 @@ class DispatcherLoop:
         self.executor.shutdown(wait=True)
         self.cleanup_executor.shutdown(wait=True)
         self.container_manager.close()
+        override_local = getattr(self, "_override_local", None)
+        override_container = getattr(self, "_override_container", None)
+        if override_local is not None:
+            override_local.close()
+        if override_container is not None:
+            override_container.close()
         self.client.close()
+
+    def execution_backend(self, backend: str | None):
+        """Per-project docker/local override. Unset follows the dispatcher execution mode."""
+        if backend in (None, ""):
+            requested = self.config.runtime.execution
+        elif backend == "docker":
+            requested = "container"
+        else:
+            requested = backend
+        if requested == self.config.runtime.execution:
+            return self.container_manager
+        if requested == "local":
+            override = getattr(self, "_override_local", None)
+            if override is None:
+                override = LocalBackend(self.config.local or LocalConfig(), self.config.auth)
+                self._override_local = override
+            return override
+        if self.config.container is None:
+            LOG.warning("project requested docker but container config is missing; using dispatcher backend")
+            return self.container_manager
+        override = getattr(self, "_override_container", None)
+        if override is None:
+            override = ContainerManager(self.config.container, self.config.auth)
+            self._override_container = override
+        return override
 
     def run(self, once: bool = False) -> None:
         try:
             self.run_startup_healthchecks()
             while True:
                 try:
+                    self._maybe_reload_config()
                     if not self._settings_checked:
                         self._validate_server_settings()
                         self._settings_checked = True
+                    self._bootstrap_auth_deployment()
+                    if not self._run_auth_control_cycle():
+                        if once:
+                            raise RuntimeError("authentication control cycle failed")
+                        time.sleep(self.config.runtime.interval)
+                        continue
                     self._reap_futures()
                     self._reap_cleanup_futures()
                     summaries = self.client.list_projects()
+                    self._expire_project_timeouts(summaries)
                     self._initialize_reason_checkpoints(summaries)
                     self._refresh_runtime_projects(summaries)
                     self._cancel_inactive_tasks(summaries)
@@ -108,6 +155,49 @@ class DispatcherLoop:
                 time.sleep(self.config.runtime.interval)
         finally:
             self.close()
+
+    def _maybe_reload_config(self) -> None:
+        try:
+            mtime_ns = self.config_path.stat().st_mtime_ns
+        except OSError as exc:
+            LOG.warning("dispatch config stat failed path=%s error=%s", self.config_path, exc)
+            return
+        if mtime_ns == self._config_mtime_ns:
+            return
+        if self.futures or self.cleanup_futures:
+            LOG.info(
+                "dispatch config change detected; reload deferred until tasks are idle running=%s cleanup=%s",
+                len(self.futures),
+                len(self.cleanup_futures),
+            )
+            return
+        try:
+            updated = DispatchConfig.load(self.config_path)
+        except Exception as exc:
+            LOG.error("dispatch config reload failed path=%s error=%s", self.config_path, exc)
+            self._config_mtime_ns = mtime_ns
+            return
+        immutable_before = (
+            self.config.server,
+            self.config.runtime.execution,
+            self.config.container,
+            self.config.local,
+        )
+        immutable_after = (updated.server, updated.runtime.execution, updated.container, updated.local)
+        if immutable_before != immutable_after:
+            LOG.warning("dispatch config saved but server/backend changes require dispatcher restart")
+            self._config_mtime_ns = mtime_ns
+            return
+        self.config = updated
+        self._config_mtime_ns = mtime_ns
+        if self.config.runtime.execution == "local":
+            self._run_local_binary_check()
+        LOG.info(
+            "dispatch config hot-reloaded workers=%s max_workers=%s interval=%ss",
+            [worker.name for worker in self.config.workers],
+            self.config.runtime.max_workers,
+            self.config.runtime.interval,
+        )
 
     def run_startup_healthchecks_only(self) -> None:
         try:
@@ -253,7 +343,7 @@ class DispatcherLoop:
 
     def _try_dispatch_project(self, summary: ProjectSummary) -> bool:
         skip_scope = f"project:{summary.id}:skip"
-        container_name = self.container_manager.container_name(summary.id)
+        container_name = self.execution_backend(summary.backend).container_name(summary.id)
         if container_name in self._cleanup_pending:
             self._log_changed(
                 f"{skip_scope}:cleanup_pending",
@@ -286,6 +376,9 @@ class DispatcherLoop:
         if self._is_initial_project(project):
             if project.project.reason is not None:
                 return False
+            if self._has_dead_bootstrap_intent(project):
+                export_yaml = self.client.export_project(summary.id)
+                return self._dispatch_reason(project, export_yaml, "bootstrap_dead")
             if self._project_requires_bootstrap(project):
                 return self._dispatch_initial_project(project)
             export_yaml = self.client.export_project(summary.id)
@@ -296,14 +389,40 @@ class DispatcherLoop:
                 export_yaml = self.client.export_project(summary.id)
                 return self._dispatch_reason(project, export_yaml, reason_trigger)
         running_intent_ids = self._project_running_explore_intents(summary.id)
-        unclaimed_intents = [
+        fresh_intents = [
             intent
             for intent in project.intents
             if intent.to is None
             and intent.worker is None
             and intent.id not in running_intent_ids
             and not self._is_bootstrap_intent(intent)
+            and intent.concluded_as is None
         ]
+        stale_intents = [
+            intent
+            for intent in project.intents
+            if intent.to is None
+            and intent.worker is None
+            and intent.id not in running_intent_ids
+            and not self._is_bootstrap_intent(intent)
+            and intent.concluded_as == "stale"
+        ]
+        verify_ready = [
+            intent
+            for intent in fresh_intents
+            if self._is_verify_intent(intent)
+            and (
+                not self.config.tasks.verify.require_fire_approval
+                or intent.fire_status in ("approved", "fired")
+            )
+        ]
+        fresh_intents = [intent for intent in fresh_intents if not self._is_verify_intent(intent)]
+        stale_intents = [intent for intent in stale_intents if not self._is_verify_intent(intent)]
+        if verify_ready:
+            newest = max(verify_ready, key=lambda item: item.created_at)
+            export_yaml = self.client.export_project(summary.id)
+            return self._dispatch_verify(project, export_yaml, newest)
+        unclaimed_intents = fresh_intents or stale_intents
         if running_intent_ids and not unclaimed_intents:
             self._log_changed(
                 f"{skip_scope}:explore_running",
@@ -364,7 +483,7 @@ class DispatcherLoop:
         return self._dispatch_bootstrap(project, intent)
 
     def _dispatch_reason(self, project: ProjectDetail, export_yaml: str, trigger: str) -> bool:
-        selection = self._select_worker(project.project.id, "reason")
+        selection = self._select_worker(project.project.id, "reason", project.project.difficulty)
         worker = selection.worker
         if worker is None:
             self._log_changed(
@@ -402,7 +521,7 @@ class DispatcherLoop:
                 run_reason_task,
                 self.config,
                 self.client,
-                self.container_manager,
+                self.execution_backend(project.project.backend),
                 project,
                 export_yaml,
                 worker,
@@ -425,10 +544,11 @@ class DispatcherLoop:
         self.runtime_project_ids.add(project.project.id)
         self._clear_project_log_state(project.project.id)
         LOG.info("dispatched reason project=%s worker=%s trigger=%s", project.project.id, worker.name, trigger)
+        self._record_task_event(project.project.id, "reason", worker.name, None, "running", f"Reason started: {trigger}")
         return True
 
     def _dispatch_bootstrap(self, project: ProjectDetail, intent: Intent) -> bool:
-        selection = self._select_worker(project.project.id, "bootstrap")
+        selection = self._select_worker(project.project.id, "bootstrap", project.project.difficulty)
         worker = selection.worker
         if worker is None:
             self._log_changed(
@@ -469,7 +589,7 @@ class DispatcherLoop:
                 run_bootstrap_task,
                 self.config,
                 self.client,
-                self.container_manager,
+                self.execution_backend(project.project.backend),
                 project,
                 intent,
                 worker,
@@ -483,10 +603,46 @@ class DispatcherLoop:
         self.runtime_project_ids.add(project.project.id)
         self._clear_project_log_state(project.project.id)
         LOG.info("dispatched bootstrap project=%s intent=%s worker=%s", project.project.id, intent.id, worker.name)
+        self._record_task_event(project.project.id, "bootstrap", worker.name, intent.id, "running", "Bootstrap worker started")
+        return True
+
+    def _is_verify_intent(self, intent: Intent) -> bool:
+        if intent.task_kind == "verify":
+            return True
+        return intent.description.upper().startswith("VERIFY")
+
+    def _dispatch_verify(self, project: ProjectDetail, export_yaml: str, intent: Intent) -> bool:
+        selection = self._select_worker(project.project.id, "verify", project.project.difficulty)
+        worker = selection.worker
+        if worker is None or not worker.has_capabilities(["live_http"]):
+            return False
+        claim = self.client.heartbeat(project.project.id, intent.id, worker.name)
+        if not claim.ok:
+            return False
+        try:
+            future = self.executor.submit(
+                run_verify_task,
+                self.config,
+                self.client,
+                self.execution_backend(project.project.backend),
+                project,
+                export_yaml,
+                intent,
+                worker,
+                cancellation := TaskCancellation(),
+            )
+        except Exception:
+            LOG.exception("failed to submit verify task project=%s intent=%s", project.project.id, intent.id)
+            self._best_effort_release(project.project.id, intent.id, worker.name)
+            return False
+        self.futures[future] = RunningTask(project.project.id, "verify", worker.name, cancellation, intent_id=intent.id)
+        self.runtime_project_ids.add(project.project.id)
+        LOG.info("dispatched verify project=%s intent=%s worker=%s", project.project.id, intent.id, worker.name)
+        self._record_task_event(project.project.id, "verify", worker.name, intent.id, "running", "Verify worker started")
         return True
 
     def _dispatch_explore(self, project: ProjectDetail, export_yaml: str, intent: Intent) -> bool:
-        selection = self._select_worker(project.project.id, "explore")
+        selection = self._select_worker(project.project.id, "explore", project.project.difficulty)
         worker = selection.worker
         if worker is None:
             self._log_changed(
@@ -527,7 +683,7 @@ class DispatcherLoop:
                 run_explore_task,
                 self.config,
                 self.client,
-                self.container_manager,
+                self.execution_backend(project.project.backend),
                 project,
                 export_yaml,
                 intent,
@@ -542,9 +698,10 @@ class DispatcherLoop:
         self.runtime_project_ids.add(project.project.id)
         self._clear_project_log_state(project.project.id)
         LOG.info("dispatched explore project=%s intent=%s worker=%s", project.project.id, intent.id, worker.name)
+        self._record_task_event(project.project.id, "explore", worker.name, intent.id, "running", "Intent exploration started")
         return True
 
-    def _select_worker(self, project_id: str, task_type: str) -> WorkerSelection:
+    def _select_worker(self, project_id: str, task_type: str, difficulty: str | None = None) -> WorkerSelection:
         now = time.time()
         candidates: list[WorkerConfig] = []
         blocked_busy: list[str] = []
@@ -555,6 +712,8 @@ class DispatcherLoop:
         for worker in self.config.workers:
             if task_type not in worker.task_types:
                 blocked_task_type.append(worker.name)
+                continue
+            if worker.difficulties and (difficulty is None or difficulty not in worker.difficulties):
                 continue
             running = running_counts.get(worker.name, 0)
             if running >= worker.max_running:
@@ -642,7 +801,15 @@ class DispatcherLoop:
         return len(self.runtime_project_ids & active_ids)
 
     def _project_open_intent_count(self, project: ProjectDetail) -> int:
-        return sum(1 for intent in project.intents if intent.to is None)
+        return sum(
+            1 for intent in project.intents if intent.to is None and intent.concluded_as is None
+        )
+
+    def _has_dead_bootstrap_intent(self, project: ProjectDetail) -> bool:
+        return any(
+            self._is_bootstrap_intent(intent) and intent.concluded_as == "dead"
+            for intent in project.intents
+        )
 
     def _is_bootstrap_intent(self, intent: Intent) -> bool:
         return (
@@ -723,6 +890,16 @@ class DispatcherLoop:
             task = self.futures.pop(future)
             try:
                 outcome = future.result()
+                self._record_task_event(
+                    task.project_id,
+                    task.task_type,
+                    task.worker_name,
+                    task.intent_id,
+                    "success" if outcome == "success" else ("warning" if outcome in ("cancelled", "rejected") else "error"),
+                    f"{task.task_type.capitalize()} finished: {outcome}",
+                    event_type="task_finished",
+                    payload={"outcome": outcome},
+                )
                 if outcome == "cancelled":
                     LOG.info(
                         "task cancelled project=%s task=%s worker=%s",
@@ -762,6 +939,27 @@ class DispatcherLoop:
                     )
                 else:
                     self.worker_rejected_until.pop(rejection_key, None)
+                if (
+                    outcome in ("failed", "rejected")
+                    and task.task_type in ("explore", "bootstrap")
+                    and task.intent_id is not None
+                ):
+                    result = self.client.record_failure(
+                        task.project_id,
+                        task.intent_id,
+                        task.worker_name,
+                        stale_retry_threshold=self.config.runtime.stale_retry_threshold,
+                        dead_retry_threshold=self.config.runtime.dead_retry_threshold,
+                    )
+                    if not result.ok:
+                        LOG.warning(
+                            "intent failure record failed project=%s intent=%s worker=%s status=%s body=%s",
+                            task.project_id,
+                            task.intent_id,
+                            task.worker_name,
+                            result.status_code,
+                            result.text,
+                        )
                 if outcome == "success" and task.task_type == "reason":
                     assert task.fact_count is not None
                     assert task.hint_count is not None
@@ -778,7 +976,17 @@ class DispatcherLoop:
                         task.hint_count,
                         task.open_intent_count,
                     )
-            except Exception:
+            except Exception as exc:
+                self._record_task_event(
+                    task.project_id,
+                    task.task_type,
+                    task.worker_name,
+                    task.intent_id,
+                    "error",
+                    f"{task.task_type.capitalize()} crashed: {type(exc).__name__}",
+                    event_type="task_finished",
+                    payload={"outcome": "crashed"},
+                )
                 LOG.exception("task crashed project=%s task=%s worker=%s", task.project_id, task.task_type, task.worker_name)
 
     def _cleanup_completed_containers(self, summaries: list[ProjectSummary]) -> None:
@@ -787,13 +995,14 @@ class DispatcherLoop:
                 continue
             if self._inactive_cleanup_done.get(summary.id) == summary.status:
                 continue
-            container_name = self.container_manager.container_name(summary.id)
+            backend = self.execution_backend(summary.backend)
+            container_name = backend.container_name(summary.id)
             if container_name in self._cleanup_pending:
                 continue
-            if not self.container_manager.needs_completed_cleanup(summary.id):
+            if not backend.needs_completed_cleanup(summary.id):
                 self._inactive_cleanup_done[summary.id] = summary.status
                 continue
-            future = self.cleanup_executor.submit(self.container_manager.cleanup_completed, summary.id)
+            future = self.cleanup_executor.submit(backend.cleanup_completed, summary.id)
             self.cleanup_futures[future] = (container_name, summary.id, summary.status)
             self._cleanup_pending.add(container_name)
 
@@ -803,13 +1012,14 @@ class DispatcherLoop:
                 continue
             if self._inactive_cleanup_done.get(summary.id) == summary.status:
                 continue
-            container_name = self.container_manager.container_name(summary.id)
+            backend = self.execution_backend(summary.backend)
+            container_name = backend.container_name(summary.id)
             if container_name in self._cleanup_pending:
                 continue
-            if not self.container_manager.needs_stopped_cleanup(summary.id):
+            if not backend.needs_stopped_cleanup(summary.id):
                 self._inactive_cleanup_done[summary.id] = summary.status
                 continue
-            future = self.cleanup_executor.submit(self.container_manager.cleanup_stopped, summary.id)
+            future = self.cleanup_executor.submit(backend.cleanup_stopped, summary.id)
             self.cleanup_futures[future] = (container_name, summary.id, summary.status)
             self._cleanup_pending.add(container_name)
 
@@ -841,6 +1051,32 @@ class DispatcherLoop:
             current_status = inactive_status_by_id.get(project_id)
             if current_status != status:
                 self._inactive_cleanup_done.pop(project_id, None)
+
+    def _expire_project_timeouts(self, summaries: list[ProjectSummary]) -> None:
+        timeout = self.config.runtime.project_timeout
+        if timeout is None:
+            return
+        now = datetime.now(timezone.utc)
+        for summary in summaries:
+            if summary.status != "active" or summary.started_at is None:
+                continue
+            started_at = datetime.fromisoformat(summary.started_at.replace("Z", "+00:00")).astimezone(
+                timezone.utc
+            )
+            if (now - started_at).total_seconds() < timeout:
+                continue
+            response = self.client.update_project_status(summary.id, "stopped")
+            if not response.ok:
+                LOG.warning(
+                    "project timeout stop failed project=%s status=%s timeout=%ss",
+                    summary.id, response.status_code, timeout,
+                )
+                continue
+            summary.status = "stopped"
+            LOG.warning(
+                "project wall timeout reached project=%s started_at=%s timeout=%ss",
+                summary.id, started_at.isoformat(), timeout,
+            )
 
     def _cancel_inactive_tasks(self, summaries: list[ProjectSummary]) -> None:
         status_by_project = {summary.id: summary.status for summary in summaries}
@@ -887,6 +1123,37 @@ class DispatcherLoop:
         if not response.ok and response.status_code not in (403, 409):
             LOG.warning("reason release failed project=%s worker=%s status=%s", project_id, worker_name, response.status_code)
 
+    def _record_task_event(
+        self,
+        project_id: str,
+        task_type: str,
+        worker_name: str,
+        intent_id: str | None,
+        status: str,
+        message: str,
+        *,
+        event_type: str = "task_started",
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        response = self.client.create_runtime_event(
+            project_id,
+            event_type=event_type,
+            phase=task_type,
+            status=status,
+            message=message,
+            worker=worker_name,
+            intent_id=intent_id,
+            payload=payload,
+        )
+        if not response.ok and response.status_code not in (403, 404):
+            LOG.warning(
+                "runtime event write failed project=%s task=%s worker=%s status=%s",
+                project_id,
+                task_type,
+                worker_name,
+                response.status_code,
+            )
+
     def _log_changed(self, scope: str, level: int, message: str, *args: object) -> None:
         state = (level, message, args)
         if self._log_state.get(scope) == state:
@@ -903,29 +1170,72 @@ class DispatcherLoop:
             if scope.startswith(prefix):
                 self._log_state.pop(scope, None)
 
+    def _bootstrap_auth_deployment(self) -> None:
+        if getattr(self, "_auth_deployment_checked", False):
+            return
+        snapshot = self.config.auth_deployment_snapshot()
+        if not snapshot.get("dispatcher_token") and self.config.auth is None:
+            self._auth_deployment_checked = True
+            return
+        if not snapshot.get("dispatcher_token"):
+            raise RuntimeError("auth deployment requires dispatch config server_token")
+        result = self.client.bootstrap_auth_deployment(snapshot)
+        if not result.ok:
+            raise RuntimeError(
+                f"auth deployment bootstrap failed with server status {result.status_code}"
+            )
+        self._auth_deployment_checked = True
+
+    def _run_auth_control_cycle(self) -> bool:
+        if self.config.auth_control_plane_mode == "legacy":
+            return True
+        control = getattr(self, "auth_control", None)
+        if control is None:
+            return False
+        try:
+            results = control.run_cycle()
+            return all(result.ok for result in results)
+        except (AttributeError, ProtocolError, requests.RequestException):
+            LOG.exception("auth control cycle failed")
+            return False
+
     def _validate_server_settings(self) -> None:
-        settings = self.client.get_settings()
-        interval = self.config.runtime.interval
-        for name, value in (("intent_timeout", settings.intent_timeout), ("reason_timeout", settings.reason_timeout)):
-            if value <= interval:
+        configured_timeout = self.config.runtime.server_lease_timeout
+        settings = (
+            self.client.update_settings(configured_timeout)
+            if configured_timeout is not None
+            else self.client.get_settings()
+        )
+        server_mode = getattr(settings, "auth_control_plane_mode", "legacy")
+        if self.config.auth_control_plane_mode != server_mode:
+            raise RuntimeError(
+                "dispatcher auth_control_plane_mode must equal server auth_control_plane_mode"
+            )
+        if self.config.auth is not None:
+            intervention = self.config.auth.intervention
+            server_request_ttl = getattr(settings, "auth_request_ttl", intervention.request_ttl)
+            server_claim_ttl = getattr(settings, "auth_claim_ttl", intervention.claim_ttl)
+            if intervention.request_ttl != server_request_ttl:
                 raise RuntimeError(
-                    f"server {name}={value}s must be greater than dispatcher interval={interval}s"
+                    "dispatcher auth intervention.request_ttl must equal server auth_request_ttl"
                 )
-            if value < interval * 2:
-                LOG.warning(
-                    "server %s is tight %s=%ss interval=%ss; heartbeat slack is only %ss",
-                    name,
-                    name,
-                    value,
-                    interval,
-                    value - interval,
+            if intervention.claim_ttl != server_claim_ttl:
+                raise RuntimeError(
+                    "dispatcher auth intervention.claim_ttl must equal server auth_claim_ttl"
                 )
-                continue
+        interval = self.config.runtime.interval
+        effective_grace = self.config.runtime.heartbeat_failure_grace or interval * 2
+        for name, value in (("intent_timeout", settings.intent_timeout), ("reason_timeout", settings.reason_timeout)):
+            if value <= effective_grace:
+                raise RuntimeError(
+                    f"server {name}={value}s must be greater than heartbeat failure grace={effective_grace}s"
+                )
             LOG.info(
-                "server setting validated %s=%ss interval=%ss",
+                "server setting validated %s=%ss interval=%ss grace=%ss",
                 name,
                 value,
                 interval,
+                effective_grace,
             )
 
     def _run_startup_healthchecks(self, *, show_commands: bool) -> None:

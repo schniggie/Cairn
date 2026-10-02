@@ -89,6 +89,8 @@ def _export_yaml(conn, project_id: str) -> str:
             "worker": i["worker"],
             "created_at": format_export_timestamp(i["created_at"]),
             "concluded_at": format_export_timestamp(i["concluded_at"]),
+            "concluded_as": i["concluded_as"],
+            "retry_count": i["retry_count"],
         }
         intent_list.append(entry)
 

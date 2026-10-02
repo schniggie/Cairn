@@ -2,27 +2,38 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 
-from cairn.dispatcher.config import DispatchConfig, WorkerConfig
-from cairn.dispatcher.contracts import parse_json_output, validate_explore_payload
+from cairn.dispatcher.config import DispatchConfig, SafetyConfig, WorkerConfig
+from cairn.dispatcher.contracts import detach_http_records, parse_json_output, validate_explore_payload
 from cairn.dispatcher.prompting import load_prompt, render_prompt
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
 from cairn.dispatcher.tasks.common import (
+    ensure_static_container,
+    knowledge_prompt,
+    backfill_safety_fallbacks,
     best_effort_release,
     cancel_reason,
     did_timeout,
+    latest_blocked_action,
+    persist_http_records,
     project_allows_conclude_fallback,
     preview,
     run_worker_process,
+    save_session_log,
+    SafetyRunContext,
     task_healthcheck_enabled,
     write_conclude_result,
     write_graph_snapshot_reference,
 )
-from cairn.dispatcher.workers.registry import get_driver
-from cairn.server.models import Intent, ProjectDetail
+from cairn.safety.r1 import is_r1_fact, synthesize_r1_fact
+from cairn.safety.v1 import is_v1_fact, render_safety_decision_context, synthesize_v1_fact
+from cairn.dispatcher.workers.registry import execution_mode_for, get_driver
+from cairn.dispatcher.workers.base import DriverResult
+from cairn.server.models import AuditEvent, Intent, ProjectDetail
 
 LOG = logging.getLogger(__name__)
 
@@ -37,13 +48,26 @@ def run_explore_task(
     worker: WorkerConfig,
     cancellation: TaskCancellation,
 ) -> str:
-    driver = get_driver(worker.type, config.runtime.execution)
+    driver = get_driver(worker.type, execution_mode_for(container_manager, config.runtime.execution))
+    run_id = uuid.uuid4().hex
     task_started = time.perf_counter()
     healthcheck_timeout = config.runtime.healthcheck_timeout
-    lease = HeartbeatLease.for_intent(client, project.project.id, intent.id, worker.name, config.runtime.interval)
+    lease = HeartbeatLease.for_intent(
+        client, project.project.id, intent.id, worker.name, config.runtime.interval,
+        config.runtime.heartbeat_failure_grace or config.runtime.interval * 2,
+    )
     lease.start()
+    container_name = ""
+    session: str | None = None
     try:
-        container_name = container_manager.ensure_running(project.project.id)
+        container_name, codebase_error = ensure_static_container(config, container_manager, project)
+        if codebase_error:
+            best_effort_release(client, project.project.id, intent.id, worker.name)
+            return "failed"
+        assert container_name is not None
+        from cairn.dispatcher.tasks.bootstrap import _inject_init_files
+
+        _inject_init_files(container_manager, container_name, project)
 
         if task_healthcheck_enabled(config):
             LOG.info(
@@ -97,6 +121,7 @@ def run_explore_task(
                 ),
                 "intent_id": intent.id,
                 "intent_description": intent.description,
+                **knowledge_prompt(container_manager, container_name, project.project.project_root),
             },
         )
 
@@ -108,12 +133,23 @@ def run_explore_task(
             container_manager,
             container_name,
             worker,
-            execute.argv,
+            execute,
             phase="explore_execute",
             timeout=config.tasks.explore.timeout,
+            safety=config.safety,
+            safety_context=SafetyRunContext(
+                run_id=run_id,
+                project_id=project.project.id,
+                intent_id=intent.id,
+                worker=worker.name,
+                phase="explore_execute",
+            ),
             lease=lease,
             cancellation=cancellation,
+            stdin=execute.stdin,
         )
+        backfill_safety_fallbacks(client, first.stderr, config.safety)
+        safety_decision = latest_blocked_action(client, project.project.id, run_id)
         execute_ms = int((time.perf_counter() - execute_started) * 1000)
         session = driver.extract_session(session, first.stdout, first.stderr)
         cancelled = cancel_reason(first, cancellation)
@@ -143,6 +179,7 @@ def run_explore_task(
             try:
                 model_output = driver.extract_response_text(first.stdout, first.stderr)
                 payload = parse_json_output(model_output)
+                payload, http_records = detach_http_records(payload)
                 kind, description = validate_explore_payload(payload)
             except Exception as exc:
                 LOG.warning(
@@ -167,10 +204,17 @@ def run_explore_task(
                     intent,
                     export_yaml,
                     session,
+                    run_id,
                     lease,
                     cancellation,
+                    safety_decision,
                 )
+            persist_http_records(client, project.project.id, intent.id, worker.name, http_records)
             if kind == "rejected":
+                if safety_decision is not None:
+                    return _write_synthesized_safety_fact(
+                        client, project.project.id, intent, worker.name, safety_decision, execute_ms
+                    )
                 LOG.warning(
                     "explore rejected project=%s intent=%s worker=%s execute_ms=%s total_ms=%s stdout_preview=%s",
                     project.project.id,
@@ -182,6 +226,23 @@ def run_explore_task(
                 )
                 best_effort_release(client, project.project.id, intent.id, worker.name)
                 return "rejected"
+            if safety_decision is not None and not _is_required_safety_fact(description, safety_decision):
+                return _try_conclude_fallback(
+                    config,
+                    client,
+                    container_manager,
+                    container_name,
+                    worker,
+                    driver,
+                    project.project.id,
+                    intent,
+                    export_yaml,
+                    session,
+                    run_id,
+                    lease,
+                    cancellation,
+                    safety_decision,
+                )
             return write_conclude_result(
                 client,
                 project.project.id,
@@ -214,8 +275,27 @@ def run_explore_task(
                 intent,
                 export_yaml,
                 session,
+                run_id,
                 lease,
                 cancellation,
+                safety_decision,
+            )
+        if safety_decision is not None:
+            return _try_conclude_fallback(
+                config,
+                client,
+                container_manager,
+                container_name,
+                worker,
+                driver,
+                project.project.id,
+                intent,
+                export_yaml,
+                session,
+                run_id,
+                lease,
+                cancellation,
+                safety_decision,
             )
         LOG.warning(
             "explore command failed project=%s intent=%s worker=%s code=%s execute_ms=%s total_ms=%s stdout_preview=%s stderr_preview=%s",
@@ -235,6 +315,10 @@ def run_explore_task(
         best_effort_release(client, project.project.id, intent.id, worker.name)
         return "failed"
     finally:
+        if container_name:
+            save_session_log(
+                container_manager, container_name, project.project.id, worker.name, session, phase="explore"
+            )
         lease.stop()
 
 
@@ -249,8 +333,10 @@ def _try_conclude_fallback(
     intent: Intent,
     export_yaml: str,
     session: str | None,
+    run_id: str,
     lease: HeartbeatLease,
     cancellation: TaskCancellation,
+    safety_decision: AuditEvent | None = None,
 ) -> str:
     if not driver.supports_conclude() or not session:
         LOG.info(
@@ -261,6 +347,10 @@ def _try_conclude_fallback(
             driver.supports_conclude(),
             bool(session),
         )
+        if safety_decision is not None:
+            return _write_synthesized_safety_fact(
+                client, project_id, intent, worker.name, safety_decision, 0
+            )
         best_effort_release(client, project_id, intent.id, worker.name)
         return "failed"
     if lease.failure is not None:
@@ -287,7 +377,8 @@ def _try_conclude_fallback(
         best_effort_release(client, project_id, intent.id, worker.name)
         return "failed"
 
-    container_name = container_manager.ensure_running(project_id)
+    project_root = client.get_project(project_id).project.project_root
+    container_name = container_manager.ensure_running(project_id, project_root=project_root)
 
     prompt = render_prompt(
         load_prompt(config.runtime.prompt_group, "explore_conclude.md"),
@@ -300,21 +391,34 @@ def _try_conclude_fallback(
             ),
             "intent_id": intent.id,
             "intent_description": intent.description,
+            "safety_decision_context": render_safety_decision_context(safety_decision),
+            **knowledge_prompt(container_manager, container_name, project_root),
         },
     )
-    conclude_argv = driver.build_conclude(worker, prompt, session)
+    conclude_command = driver.build_conclude(worker, prompt, session)
     LOG.info("starting conclude fallback project=%s intent=%s worker=%s", project_id, intent.id, worker.name)
     conclude_started = time.perf_counter()
     result = _run_process(
         container_manager,
         container_name,
         worker,
-        conclude_argv,
+        conclude_command,
         phase="explore_conclude",
         timeout=config.tasks.explore.conclude_timeout,
+        safety=config.safety,
+        safety_context=SafetyRunContext(
+            run_id=run_id,
+            project_id=project_id,
+            intent_id=intent.id,
+            worker=worker.name,
+            phase="explore_conclude",
+        ),
         lease=lease,
         cancellation=cancellation,
+        stdin=conclude_command.stdin,
     )
+    backfill_safety_fallbacks(client, result.stderr, config.safety)
+    safety_decision = latest_blocked_action(client, project_id, run_id) or safety_decision
     conclude_ms = int((time.perf_counter() - conclude_started) * 1000)
     cancelled = cancel_reason(result, cancellation)
     if cancelled is not None:
@@ -343,11 +447,16 @@ def _try_conclude_fallback(
             preview(result.stdout),
             preview(result.stderr),
         )
+        if safety_decision is not None:
+            return _write_synthesized_safety_fact(
+                client, project_id, intent, worker.name, safety_decision, conclude_ms
+            )
         best_effort_release(client, project_id, intent.id, worker.name)
         return "failed"
     try:
         model_output = driver.extract_response_text(result.stdout, result.stderr)
         payload = parse_json_output(model_output)
+        payload, http_records = detach_http_records(payload)
         kind, description = validate_explore_payload(payload)
     except Exception as exc:
         LOG.warning(
@@ -360,9 +469,18 @@ def _try_conclude_fallback(
             preview(result.stdout),
             preview(result.stderr),
         )
+        if safety_decision is not None:
+            return _write_synthesized_safety_fact(
+                client, project_id, intent, worker.name, safety_decision, conclude_ms
+            )
         best_effort_release(client, project_id, intent.id, worker.name)
         return "failed"
+    persist_http_records(client, project_id, intent.id, worker.name, http_records)
     if kind == "rejected":
+        if safety_decision is not None:
+            return _write_synthesized_safety_fact(
+                client, project_id, intent, worker.name, safety_decision, conclude_ms
+            )
         LOG.warning(
             "conclude rejected project=%s intent=%s worker=%s conclude_ms=%s stdout_preview=%s",
             project_id,
@@ -373,6 +491,10 @@ def _try_conclude_fallback(
         )
         best_effort_release(client, project_id, intent.id, worker.name)
         return "rejected"
+    if safety_decision is not None and not _is_required_safety_fact(description, safety_decision):
+        return _write_synthesized_safety_fact(
+            client, project_id, intent, worker.name, safety_decision, conclude_ms
+        )
     return write_conclude_result(
         client,
         project_id,
@@ -384,24 +506,59 @@ def _try_conclude_fallback(
     )
 
 
+def _is_required_safety_fact(description: str, event: AuditEvent) -> bool:
+    if event.decision == "resource_pause":
+        return is_r1_fact(description)
+    return is_v1_fact(description)
+
+
+def _write_synthesized_safety_fact(
+    client: CairnClient,
+    project_id: str,
+    intent: Intent,
+    worker_name: str,
+    event: AuditEvent,
+    phase_ms: int,
+) -> str:
+    if event.decision == "resource_pause":
+        description = synthesize_r1_fact(intent.description, event)
+    else:
+        description = synthesize_v1_fact(intent.description, event)
+    return write_conclude_result(
+        client,
+        project_id,
+        intent.id,
+        worker_name,
+        description,
+        source="safety_synthesized",
+        phase_ms=phase_ms,
+    )
+
+
 def _run_process(
     container_manager: ContainerManager,
     container_name: str,
     worker: WorkerConfig,
-    argv: list[str],
+    command: DriverResult,
     *,
     phase: str,
     timeout: int,
+    safety: SafetyConfig | None,
+    safety_context: SafetyRunContext,
     lease: HeartbeatLease,
     cancellation: TaskCancellation,
+    stdin: str | None = None,
 ):
     return run_worker_process(
         container_manager,
         container_name,
         worker,
-        argv,
+        command,
         phase=phase,
         timeout_seconds=timeout,
+        safety=safety,
+        safety_context=safety_context,
         lease=lease,
         cancellation=cancellation,
+        stdin=stdin,
     )

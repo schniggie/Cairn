@@ -5,11 +5,12 @@ import json
 import pytest
 
 from cairn.dispatcher.contracts import (
+    detach_http_records,
     parse_json_output,
     validate_explore_payload,
     validate_reason_payload,
 )
-from cairn.dispatcher.runtime.process import ManagedProcess
+from cairn.dispatcher.runtime.process import BoundedTextBuffer, ImportantJsonLineBuffer, ManagedProcess
 from cairn.dispatcher.workers.adapters.pi import PiDriver
 
 
@@ -21,7 +22,7 @@ def test_parse_json_output_extracts_object_from_markdown_noise() -> None:
 
 
 def test_reason_payload_limits_number_of_intents() -> None:
-    kind, intents = validate_reason_payload(
+    result = validate_reason_payload(
         {
             "accepted": True,
             "data": {
@@ -35,12 +36,11 @@ def test_reason_payload_limits_number_of_intents() -> None:
         max_intents=1,
     )
 
-    assert kind == "intents"
-    assert intents == [{"from": ["f001"], "description": "one"}]
+    assert result.intents == [{"from": ["f001"], "description": "one"}]
 
 
 def test_reason_payload_requires_intent_when_none_are_open() -> None:
-    with pytest.raises(ValueError, match="intents is required"):
+    with pytest.raises(ValueError, match="intents or interventions is required"):
         validate_reason_payload(
             {"accepted": True, "data": {}},
             open_intents_empty=True,
@@ -93,4 +93,61 @@ def test_close_stream_closes_response_even_when_stream_close_fails() -> None:
     ManagedProcess._close_stream(stream)
 
     assert stream._response.closed
+
+
+def test_bounded_text_buffer_keeps_head_and_tail_without_unbounded_growth() -> None:
+    buffer = BoundedTextBuffer(head_limit=8, tail_limit=12)
+
+    for index in range(1000):
+        buffer.append(f"chunk-{index:04d}\n")
+
+    value = buffer.value()
+    assert value.startswith("chunk-00")
+    assert value.endswith("chunk-0999\n")
+    assert len(buffer) <= 20
+    assert buffer.chunk_count <= 2
+    assert "bounded process output omitted" in value
+
+
+def test_important_json_line_buffer_keeps_session_and_latest_completion() -> None:
+    buffer = ImportantJsonLineBuffer(line_limit=256)
+    buffer.append('{"type":"session","id":"session-123"}\n')
+    buffer.append('{"type":"tool_result","data":"ignored"}\n')
+    buffer.append('{"type":"turn_end","message":{"role":"assistant","content":[]}}\n')
+
+    value = buffer.value()
+    assert "session-123" in value
+    assert "turn_end" in value
+    assert "tool_result" not in value
+
+
+def test_important_json_line_buffer_discards_oversized_lines() -> None:
+    buffer = ImportantJsonLineBuffer(line_limit=32)
+    buffer.append('{"type":"tool_result","data":"' + "x" * 100 + '"}\n')
+    buffer.append('{"type":"session","id":"s"}\n')
+
+    assert '"id":"s"' in buffer.value()
+
+
+def test_http_records_detach_without_changing_legacy_payload() -> None:
+    payload, records = detach_http_records(
+        {
+            "accepted": True,
+            "data": {
+                "description": "confirmed",
+                "http_records": [
+                    {
+                        "method": "get",
+                        "url": "https://target.test/admin",
+                        "request": {"headers": {}, "body": None},
+                        "response": {"status": 200, "headers": {}, "body": "ok"},
+                        "significance": "Admin endpoint accessible",
+                    }
+                ],
+            },
+        }
+    )
+
+    assert payload == {"accepted": True, "data": {"description": "confirmed"}}
+    assert records[0]["method"] == "GET"
 

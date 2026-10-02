@@ -1,11 +1,13 @@
 from fastapi import APIRouter, HTTPException
 
 from cairn.server.db import get_conn
+from cairn.server.event_store import insert_runtime_event
 from cairn.server.models import (
     CompleteRequest,
     CreateProjectRequest,
     Fact,
     Hint,
+    InitFile,
     HeartbeatRequest,
     Intent,
     ProjectDetail,
@@ -24,6 +26,7 @@ from cairn.server.services import (
     clear_project_reason,
     expire_reason_leases,
     expire_workers,
+    fact_from_row,
     get_completion_intent_or_409,
     get_project_or_404,
     intent_to_model,
@@ -54,6 +57,7 @@ def list_projects():
                 (SELECT COUNT(*) FROM intents WHERE project_id = p.id AND concluded_at IS NULL AND worker IS NULL) AS unclaimed_intent_count,
                 (SELECT COUNT(*) FROM hints WHERE project_id = p.id) AS hint_count
             FROM projects p
+            WHERE p.project_kind = 'general'
             ORDER BY p.created_at
         """).fetchall()
         return [
@@ -63,6 +67,10 @@ def list_projects():
                 status=row["status"],
                 bootstrap_enabled=bool(row["bootstrap_enabled"]),
                 created_at=row["created_at"],
+                started_at=row["started_at"],
+                difficulty=row["difficulty"],
+                backend=row["backend"],
+                project_root=row["project_root"],
                 reason=project_reason_from_row(row),
                 fact_count=row["fact_count"],
                 intent_count=row["intent_count"],
@@ -81,8 +89,8 @@ def create_project(body: CreateProjectRequest):
         now = utcnow()
 
         conn.execute(
-            "INSERT INTO projects (id, title, status, bootstrap_enabled, created_at) VALUES (?, ?, 'active', ?, ?)",
-            (pid, body.title, body.bootstrap_enabled, now),
+            "INSERT INTO projects (id, title, status, bootstrap_enabled, created_at, difficulty, backend, project_root) VALUES (?, ?, 'active', ?, ?, ?, ?, ?)",
+            (pid, body.title, body.bootstrap_enabled, now, body.difficulty, body.backend, body.project_root),
         )
         conn.execute(
             "INSERT INTO facts (id, project_id, description) VALUES (?, ?, ?)",
@@ -103,6 +111,26 @@ def create_project(body: CreateProjectRequest):
                 )
                 hints.append(Hint(id=hid, content=h.content, creator=h.creator, created_at=now))
 
+        init_files = []
+        if body.init_files:
+            for index, item in enumerate(body.init_files, 1):
+                file_id = f"file_{index:03d}"
+                conn.execute(
+                    "INSERT INTO init_files (id, project_id, path, content, encoding) VALUES (?, ?, ?, ?, ?)",
+                    (file_id, pid, item.path, item.content, item.encoding),
+                )
+                init_files.append(InitFile(id=file_id, path=item.path, content=item.content, encoding=item.encoding))
+
+        insert_runtime_event(
+            conn,
+            project_id=pid,
+            event_type="project_created",
+            phase="project",
+            status="success",
+            message=f"Project created: {body.title}",
+            payload={"bootstrap_enabled": body.bootstrap_enabled},
+        )
+
         return ProjectDetail(
             project=ProjectMeta(
                 id=pid,
@@ -110,6 +138,10 @@ def create_project(body: CreateProjectRequest):
                 status="active",
                 bootstrap_enabled=body.bootstrap_enabled,
                 created_at=now,
+                started_at=None,
+                difficulty=body.difficulty,
+                backend=body.backend,
+                project_root=body.project_root,
                 reason=None,
             ),
             facts=[
@@ -118,6 +150,7 @@ def create_project(body: CreateProjectRequest):
             ],
             intents=[],
             hints=hints,
+            init_files=init_files,
         )
 
 
@@ -135,12 +168,17 @@ def get_project(project_id: str):
             "SELECT * FROM hints WHERE project_id = ? ORDER BY created_at",
             (project_id,),
         ).fetchall()
+        init_file_rows = conn.execute(
+            "SELECT id, path, content, encoding FROM init_files WHERE project_id = ?",
+            (project_id,),
+        ).fetchall()
 
         return ProjectDetail(
             project=project_meta_from_row(row),
-            facts=[Fact(**dict(f)) for f in facts],
+            facts=[fact_from_row(f, conn, project_id) for f in facts],
             intents=build_intents(conn, project_id),
             hints=[Hint(**dict(h)) for h in hints],
+            init_files=[InitFile(**dict(item)) for item in init_file_rows],
         )
 
 
@@ -175,8 +213,13 @@ def update_project_status(project_id: str, body: UpdateProjectStatusRequest):
             return project_meta_from_row(row)
 
         conn.execute(
-            "UPDATE projects SET status = ? WHERE id = ?",
-            (body.status, project_id),
+            """
+            UPDATE projects
+            SET status = ?,
+                started_at = CASE WHEN ? = 'active' THEN NULL ELSE started_at END
+            WHERE id = ?
+            """,
+            (body.status, body.status, project_id),
         )
         if body.status == "stopped":
             conn.execute(
@@ -207,10 +250,11 @@ def claim_project_reason(project_id: str, body: ReasonClaimRequest):
             SET reason_worker = ?,
                 reason_trigger = ?,
                 reason_started_at = ?,
-                reason_last_heartbeat_at = ?
+                reason_last_heartbeat_at = ?,
+                started_at = COALESCE(started_at, ?)
             WHERE id = ?
             """,
-            (body.worker, body.trigger, now, now, project_id),
+            (body.worker, body.trigger, now, now, now, project_id),
         )
         updated = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
         return project_meta_from_row(updated)
@@ -340,7 +384,7 @@ def reopen_project(project_id: str, body: ReopenRequest):
             )
         clear_project_reason(conn, project_id)
         conn.execute(
-            "UPDATE projects SET status = 'active' WHERE id = ?",
+            "UPDATE projects SET status = 'active', started_at = NULL WHERE id = ?",
             (project_id,),
         )
 

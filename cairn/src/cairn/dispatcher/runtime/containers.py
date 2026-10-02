@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import io
 import logging
-from pathlib import PurePosixPath
+import os
+from pathlib import Path, PurePosixPath
 import tarfile
 import threading
 
@@ -10,17 +11,18 @@ import docker
 from docker.errors import APIError, DockerException, NotFound
 from docker.models.containers import Container
 
-from cairn.dispatcher.config import ContainerConfig
+from cairn.dispatcher.config import AuthConfig, ContainerConfig
 from cairn.dispatcher.runtime.process import ManagedProcess
 
 LOG = logging.getLogger(__name__)
 
 
 class ContainerManager:
-    _PREFIX = "cairn-dispatch-"
+    _PREFIX = os.environ.get("CAIRN_CONTAINER_PREFIX", "").strip() or "cairn-dispatch-"
 
-    def __init__(self, config: ContainerConfig):
+    def __init__(self, config: ContainerConfig, auth_config: AuthConfig | None = None):
         self._config = config
+        self._auth_config = auth_config
         self._client = docker.from_env()
         self._ensure_running_locks: dict[str, threading.Lock] = {}
         self._ensure_running_locks_guard = threading.Lock()
@@ -28,16 +30,54 @@ class ContainerManager:
     def close(self) -> None:
         self._client.close()
 
+    def project_env(self, project_id: str) -> dict[str, str]:
+        env = {"CAIRN_PROJECT_ID": project_id}
+        auth = getattr(self, "_auth_config", None)
+        if auth is not None:
+            env["CAIRN_AUTH_DIR"] = auth.worker_mount_root
+        return env
+
+    def _auth_volumes(self, project_id: str) -> dict[str, dict[str, str]]:
+        auth = getattr(self, "_auth_config", None)
+        if auth is None:
+            return {}
+        host_dir = f"{auth.store_root.rstrip('/')}/{project_id}"
+        return {host_dir: {"bind": auth.worker_mount_root, "mode": "ro"}}
+
     def container_name(self, project_id: str) -> str:
         sanitized = project_id.replace("/", "-")
         return f"{self._PREFIX}{sanitized}"
 
-    def ensure_running(self, project_id: str) -> str:
+    def ensure_running(
+        self,
+        project_id: str,
+        *,
+        project_root: str | None = None,
+        profile: str | None = None,
+        codebase_host_path: str | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> str:
         name = self.container_name(project_id)
+        if profile and profile != "static":
+            name = f"{name}-{profile}"
         with self._ensure_running_lock(name):
-            return self._ensure_running_locked(project_id, name)
+            return self._ensure_running_locked(
+                project_id,
+                name,
+                project_root,
+                codebase_host_path=codebase_host_path,
+                extra_env=extra_env,
+            )
 
-    def _ensure_running_locked(self, project_id: str, name: str) -> str:
+    def _ensure_running_locked(
+        self,
+        project_id: str,
+        name: str,
+        project_root: str | None = None,
+        *,
+        codebase_host_path: str | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> str:
         state = self.inspect_state(name)
         if state == "running":
             LOG.debug("container already running project=%s container=%s", project_id, name)
@@ -47,6 +87,20 @@ class ContainerManager:
             self._start_existing(name)
             return name
         LOG.info("creating container project=%s container=%s image=%s", project_id, name, self._config.image)
+        volumes = {}
+        if project_root:
+            root = Path(project_root).expanduser().resolve()
+            if root.is_dir():
+                volumes[str(root)] = {"bind": "/workspace/project", "mode": "ro"}
+            else:
+                LOG.warning("project_root is not a directory: %s", root)
+        if codebase_host_path:
+            codebase = Path(codebase_host_path).expanduser().resolve()
+            if codebase.is_dir():
+                volumes[str(codebase)] = {"bind": "/codebase", "mode": "ro"}
+            else:
+                LOG.warning("codebase path is not a directory: %s", codebase)
+        volumes.update(self._auth_volumes(project_id))
         try:
             self._client.containers.run(
                 self._config.image,
@@ -55,6 +109,8 @@ class ContainerManager:
                 name=name,
                 network_mode=self._config.network_mode,
                 cap_add=self._config.cap_add or None,
+                volumes=volumes or None,
+                environment=extra_env or None,
             )
             LOG.info("created container project=%s container=%s", project_id, name)
             return name
@@ -179,6 +235,7 @@ class ContainerManager:
         command: list[str],
         timeout_seconds: int | None = None,
         kill_after_seconds: int = 5,
+        stdin: str | None = None,
     ) -> ManagedProcess:
         container = self._require_container(container_name)
         argv: list[str] = []
@@ -192,10 +249,16 @@ class ContainerManager:
                 ]
             )
         argv.extend(command)
-        return ManagedProcess(container, argv, env)
+        return ManagedProcess(container, argv, env, stdin=stdin)
 
     def write_text_file(self, container_name: str, path: str, content: str) -> None:
-        archive_path, archive = self._text_file_archive(path, content)
+        self._put_archive(container_name, path, content.encode("utf-8"))
+
+    def write_binary_file(self, container_name: str, path: str, data: bytes) -> None:
+        self._put_archive(container_name, path, data)
+
+    def _put_archive(self, container_name: str, path: str, payload: bytes) -> None:
+        archive_path, archive = self._file_archive(path, payload)
         container = self._require_container(container_name)
         try:
             ok = container.put_archive(archive_path, archive)
@@ -237,6 +300,10 @@ class ContainerManager:
 
     @staticmethod
     def _text_file_archive(path: str, content: str) -> tuple[str, bytes]:
+        return ContainerManager._file_archive(path, content.encode("utf-8"))
+
+    @staticmethod
+    def _file_archive(path: str, payload: bytes) -> tuple[str, bytes]:
         target = PurePosixPath(path)
         if not target.is_absolute() or target.name in ("", ".", ".."):
             raise ValueError(f"container file path must be absolute: {path}")
@@ -249,8 +316,6 @@ class ContainerManager:
         else:
             archive_path = f"/{parts[0]}"
             archive_parts = parts[1:]
-
-        payload = content.encode("utf-8")
         stream = io.BytesIO()
         with tarfile.open(fileobj=stream, mode="w") as archive:
             parent = ""

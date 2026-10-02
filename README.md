@@ -108,7 +108,7 @@ System architecture:
 
 Workers can also run directly on the dispatcher host instead of in per-project containers — **local mode**, no Docker required. See [Local mode](#local-mode-no-docker) below.
 
-Supported worker backends: **Claude Code**, **Codex**, and **Pi**.
+Supported worker backends: **Claude Code**, **Codex**, **Pi**, **Gemini CLI**, and **OpenCode**. Pi can optionally load a packaged safety extension; see [Pi safety boundary](#pi-safety-boundary). Gemini and OpenCode can use host CLI authentication. OpenCode container mode expects `OPENCODE_MODEL`, `OPENCODE_BASE_URL`, and `OPENCODE_API_KEY`.
 
 ## Results
 
@@ -178,6 +178,13 @@ uv run --project cairn cairn dispatch --config dispatch.yaml
 uv run --project cairn cairn dispatch --config dispatch.yaml --startup-healthcheck-only
 ```
 
+Long-running deployments can set `runtime.project_timeout` to bound a project's total
+wall clock across task transitions and dispatcher restarts. Set
+`runtime.heartbeat_failure_grace` and `runtime.server_lease_timeout` together when the
+server connection can pause briefly; the lease timeout must be greater than the
+heartbeat grace. Pi workers can set `PI_REASONING_EFFORT` without tying Cairn to a
+particular model provider.
+
 ### Local mode (no Docker)
 
 Instead of one container per project, workers can run directly on the dispatcher host, reusing the machine's already-configured `claude` / `codex` / `pi` CLIs — no Docker, and no API keys in the config.
@@ -222,3 +229,12 @@ This project is licensed under **GNU AGPLv3** for personal and educational use.
 **Commercial Use**: If you wish to use this project in a commercial or proprietary environment without the AGPL-3.0 open-source obligations, **please contact me to obtain a commercial license.**
 
 **Contributions**: By submitting a Pull Request, you agree that your contributions may be used under both the AGPL-3.0 and the project's commercial license.
+
+
+## Pi safety boundary
+
+When `safety.enabled` is set, Pi workers load one packaged, trusted extension and keep automatic extension discovery disabled. Every proposed tool call is sent to the server preflight endpoint. Explicit high-confidence destructive patterns are blocked, resource-heavy or over-budget credential validation is paused, and ambiguous actions remain available and audited. Claude Code, Codex, and mock workers are unchanged; omit the `safety` block to keep the previous behavior.
+
+The server commits the decision before Pi receives a block whenever it is reachable. A destructive block closes only the current Intent with a `[V1][BRANCH_CLOSED]` Fact. A resource pause closes only the current Intent with an `[R1][RESOURCE_PAUSED]` Fact and is not vulnerability confirmation. Other project directions continue normally.
+
+The web export dialog includes an Audit tab showing proposal, decision, rule, execution result, assistant messages, correlation IDs, truncation state, and payload hash. Container mode is the stronger enforcement boundary; local mode is best-effort because Pi runs with the dispatcher's user permissions. Export `CAIRN_SAFETY_TOKEN` for both the server and the dispatcher. See `docs/specs/pi-only-safety-mvp.md`.
