@@ -96,6 +96,8 @@ ENV PYTHONUNBUFFERED=1
 
 COPY ./.agents /home/kali/workspace/.agents
 COPY ./.agents /home/kali/workspace/.claude
+# Home-level copy: worker cwd is a bind mount, so Claude discovers skills from ~/.claude/skills.
+COPY --chown=kali:kali ./.agents/skills /home/kali/.claude/skills
 COPY ./AGENTS.md /home/kali/workspace/AGENTS.md
 COPY ./AGENTS.md /home/kali/workspace/CLAUDE.md
 
