@@ -2,7 +2,7 @@
 
 This branch pulls selected work from public Cairn forks onto `schniggie/Cairn` `main` (upstream `oritera/Cairn` at `8e7e0ea`, docs: add logo). Each landed fork is its own commit so it can be reverted. English prompts and the main README stay the defaults. Chinese text is an extra `zh-CN` prompt group and packaging notes.
 
-`uv run --group dev pytest -q` from `cairn/`: **399 passed, 2 skipped**.
+`uv run --group dev pytest -q` from `cairn/`: **598 passed, 2 skipped**.
 
 Not verified here: Docker image builds, GHCR publish, browser UI, Playwright browser install, live CTF platforms, and a host `claude` binary for the research runtime status test.
 
@@ -13,15 +13,15 @@ Not verified here: Docker image builds, GHCR publish, browser UI, Playwright bro
 | timwhitez/Cairn@main | Landed | Bounded runtime controls |
 | Theearthwormsplitsvertically/Cairn@main | Partial | Pi safety is opt-in; other workers stay |
 | superZhao913/Cairn@fix/pass-worker-prompts-via-stdin | Landed | Claude and Codex prompts go through stdin |
-| wuerror/Cairn@main | Deferred | Verify phase rewrites shared server and scheduler code |
+| wuerror/Cairn@main | Landed | Verify phase, observations, and allowlist harness added beside the current conclude path |
 | LING12138-sg/Cairn@main | Landed | Intent failure, difficulty routing, commander scripts, worker tools |
-| serein431/Cairn@feat/evolve-integration | Deferred | Eval hooks overlap the worker execution path |
+| serein431/Cairn@feat/evolve-integration | Landed | Admin token, init files, trajectories, session logs |
 | yux1azhengye/Cairn@main | Partial | SSE, HTTP evidence, config API; static page not merged |
 | Shennnnnnnnnn/Cairn@main | Partial | Gemini CLI adapter only |
-| Nicholas1126/Cairn@main | Deferred | Would replace the execution engine; FlockOS excluded |
-| spdc-elm/Cairn@main | Deferred | SSH runtime and migrations rewrite the server |
-| tu95/Cairn@experiment/cairn-less-is-more-v1 | Deferred | Goal Gate replaces the scheduler protocol |
-| Rinne666/Cairn@main | Deferred | Auth control plane rewrites db, scheduler, and local process |
+| Nicholas1126/Cairn@main | Partial | OpenCode, skills, per-project engine selection. FlockOS excluded |
+| spdc-elm/Cairn@main | Separate PR | SSH runtime, ledger, and migrations are mutually exclusive with this schema |
+| tu95/Cairn@experiment/cairn-less-is-more-v1 | Partial | Kali skills landed. Goal Gate is a separate PR and is not wired |
+| Rinne666/Cairn@main | Landed | Auth control plane in legacy mode. Current scheduler and schema stay |
 | XVSHIFU/Cairn@feat/ctf-dasctf-integration | Partial | Bridge and `/ctf` API landed; dashboard UI did not |
 | XVSHIFU/Cairn@feat/research-workbench | Partial | Workbench landed; vulnerability-mining schema did not |
 
@@ -45,7 +45,9 @@ Ten commits were squashed into one after a clean apply onto current main. The on
 
 ## 4. wuerror/Cairn
 
-**Deferred.** The verify / verify_conclude task, harness, and vuln YAML examples are a large rewrite of `services.py`, models, intents, projects, prompts, and the scheduler (about 8k lines, and the branch is 6 commits behind upstream). That overlaps safety prompts, CTF intent fields, and the current task runner. A blind merge would break the suite. Revisit as its own branch after the execution path settles.
+**Landed, adapted.** Verify is an extra task type. Facts can carry type, confidence, locations, evidence, and payload drafts. `POST .../conclude` still accepts a single `description`. It also accepts `observations`, which insert one fact per observation. Base knowledge, fire approval, verify kill switch, and proxy traffic are new tables and routes. The dispatcher-owned harness (`execute_allowed_request`) fires only after allowlist checks. Explore still requires a `description` payload. The codebase bind is applied through `ensure_static_container` on bootstrap and explore.
+
+**Skipped.** Replacing `validate_explore_payload` with an observations parser. That would break the current explore tests. The P3 explore end-to-end test was narrowed to the codebase bind plus a description payload.
 
 ## 5. LING12138-sg/Cairn
 
@@ -57,7 +59,9 @@ Ten commits were squashed into one after a clean apply onto current main. The on
 
 ## 6. serein431/Cairn
 
-**Deferred.** The benchmark adapters (`benchmarks/`) and `cairn_runs/` scripts are new, but the useful behavior (admin token, `init_files`, trajectory extraction, session logs before container cleanup) is woven through config, the protocol client, containers, every worker adapter, and the scheduler. That is the same path already changed for bounded output, stdin, and safety. Landing the scripts without those hooks would not actually stop cross-project flag leakage or save session logs.
+**Landed.** Optional `CAIRN_ADMIN_TOKEN` guards `/projects`, `/skills`, and `/engines`. Worker write paths (heartbeat, claim, release, conclude, facts, hints, fail, events, http-records) stay open. `init_files` are injected into the project workspace. Claude, Codex, and Pi trajectory extractors plus session-log copy-out run before cleanup. Optional `WorkerConfig.model` is passed only when set.
+
+**Skipped.** Their `LocalProcessManager` switch, emptying `WORKER_ENV_KEYS`, and a `DriverResult` without assets/stdin. The evolve scripts import an external flywheel that is not in this repo. The hardcoded batch token was removed; scripts read `CAIRN_ADMIN_TOKEN`.
 
 ## 7. yux1azhengye/Cairn
 
@@ -75,19 +79,27 @@ Ten commits were squashed into one after a clean apply onto current main. The on
 
 ## 9. Nicholas1126/Cairn
 
-**Deferred.** The branch is about 100 commits and +260k lines. It vendors a FlockOS / `flock` tree, which was excluded. The Cairn-only pieces (opencode, a second local engine, in-app chat, skills CRUD, project knowledge) replace `dispatcher/runtime` rather than sit beside `local_backend` / `LocalProcess`. Taking both engines would fork process handling, stdin, and bounded output.
+**Partial.** OpenCode worker (`opencode run`, container mode uses `OPENCODE_CONFIG_CONTENT` when the model env is set). Skills store at `~/.cairn/skills` with zip upload as a raw body (no python-multipart). Per-project `backend` selects the existing `LocalBackend` or `ContainerManager`. `project_root` is linked or bind-mounted read-only. Bootstrap, explore, and reason prompts accept `{skills}` and `{project_knowledge}`.
+
+**Skipped.** Vendored FlockOS / `flock`. Replacing `runtime/local` and `LocalProcess`. Chat, executions, and `index.html`. Host binary path overrides live in `~/.cairn/engines.json` and do not add a second scheduler.
 
 ## 10. spdc-elm/Cairn
 
-**Deferred.** SSH environments, the execution ledger, interactive Q&A, versioned migrations, and report tasks are a second server schema and runtime (about 46 commits). They collide with the current `db.py` schema, scheduler, and container manager. Opsx command packs are markdown around that runtime, so they were not copied alone.
+**Separate PR, not wired.** SSH environments, the execution ledger, interactive Q&A, versioned migrations, and report tasks replace `SCHEMA`, `ContainerManager`, and the dispatcher. That cannot be merged into this branch without dropping verify, research, CTF, and auth tables.
+
+The upstream modules are on branch `cursor/spdc-elm-ssh-runtime-1070` under `integrations/spdc-elm-ssh-runtime/`. They are not imported by the running server. See that branch's README. Opsx command packs were not copied; they assume the replaced runtime.
 
 ## 11. tu95/Cairn
 
-**Deferred.** Goal Gate and IntentRun replace dispatcher design, intake, and the server protocol. Kali skills and `start.py` assume the Worker-in-Kali runtime and a rewritten scheduler. That cannot sit beside safety injection, difficulty routing, and the current explore/bootstrap tasks without a broken dispatcher.
+**Partial.** Kali worker skills under `container/.agents/skills` are copied into the image and mentioned from the explore prompt. That does not need a new scheduler.
+
+**Separate PR, not wired.** Goal Gate / IntentRun replaces `DispatcherLoop` and the conclude protocol. The upstream modules are on branch `cursor/tu95-goal-gate-1070` under `integrations/tu95-goal-gate/`. They are not imported. `start.py` stays in that snapshot. Do not adopt Goal Gate and the spdc migration chain together; each replaces the same scheduler.
 
 ## 12. Rinne666/Cairn
 
-**Deferred.** Playwright storage-state auth, the auth control plane, and the desktop helper are about 15k lines and rewrite models, db, the scheduler, local process, prompts, and the worker image. The Windows local-worker fixes live inside that same rewrite, so they were not split out. Chrome DevTools in the image was left with the existing worker Dockerfile plus the LING toolkit packages.
+**Landed, adapted.** Auth requests, events, credentials, graph outbox, helper views, and deployment bootstrap are additive tables (`_ensure_auth_tables`). The `SCHEMA` string was not replaced. Default `auth_control_plane_mode` is `legacy`, so the dispatcher does not require a server token unless `auth` is configured. Reason can emit `auth` interventions when `auth` is set. Windows local-process process-group and `python3` resolution run only when `os.name == "nt"`. `cairn auth` and `cairn auth-helper` are extra CLI commands.
+
+**Skipped.** Replacing the scheduler, local process, or prompts wholesale. The graph-native auth UI was not merged into `index.html`. `container/chrome-devtools-wrapper.sh` is in the tree. The Dockerfile does not install `chrome-devtools-mcp` or rewrite the image entrypoint, because that needs a network npm install and a build that was not run. Playwright stays a lazy import. Auth browser tests use a stand-in error class so collection does not require the package.
 
 ## 13. XVSHIFU/Cairn `feat/ctf-dasctf-integration`
 
@@ -107,8 +119,24 @@ Ten commits were squashed into one after a clean apply onto current main. The on
 
 ## Owner decisions
 
-- Enable Pi safety by default or leave it opt-in.
-- Whether the yux config editor and the XVSHIFU CTF dashboard should be merged into `index.html` or stay API-only.
-- Whether research web capture should become a required `playwright` dependency.
-- Whether to schedule a follow-up for verify-phase (wuerror), benchmark auth (serein), or the auth control plane (Rinne666) on top of this stack.
+### Which scheduler, schema, and runtime
+
+**Recommendation: keep this branch.** `DispatcherLoop`, the current `SCHEMA` string, and container/local execution are the default. Safety, stdin, bounded output, CTF failure tracking, verify, research, the admin token, OpenCode, and the auth control plane all use that stack.
+
+Pick **at most one** alternative. They replace the same core and were not forced together:
+
+| Choice | Branch | What changes if you adopt it |
+| --- | --- | --- |
+| Goal Gate / IntentRun | `cursor/tu95-goal-gate-1070` | Scheduler and conclude protocol. Vendored, not wired. |
+| SSH + event ledger + migrations | `cursor/spdc-elm-ssh-runtime-1070` | `SCHEMA`, `ContainerManager`, and the dispatcher. Vendored, not wired. |
+
+Merging either alternative PR only adds the upstream source under `integrations/`. It does not switch the running process. A real switch is a follow-up that replaces the core and re-ports the features above. I could not import those runtimes against this schema without that replacement.
+
+### Other choices
+
+- Pi safety stays opt-in.
+- The yux config editor and the XVSHIFU CTF dashboard are still API-only. Their HTML was not merged into `index.html`.
+- Research web capture and auth browser login stay optional. `playwright` is not a required dependency.
+- Auth control plane defaults to `legacy`. Set `auth` and `auth_control_plane_mode` only when you want the helper and fire path. If `CAIRN_ADMIN_TOKEN` and `server_token` are both set, project calls use the admin token and `/auth` calls use `server_token`.
 - Ghidra in the worker image increases build time and image size; the download URL can move.
+- Chrome DevTools wrapper is not installed in the image until `chrome-devtools-mcp` is added to the Dockerfile.
