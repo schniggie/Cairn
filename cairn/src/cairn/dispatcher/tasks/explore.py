@@ -21,6 +21,7 @@ from cairn.dispatcher.tasks.common import (
     project_allows_conclude_fallback,
     preview,
     run_worker_process,
+    save_session_log,
     SafetyRunContext,
     task_healthcheck_enabled,
     write_conclude_result,
@@ -54,8 +55,13 @@ def run_explore_task(
         config.runtime.heartbeat_failure_grace or config.runtime.interval * 2,
     )
     lease.start()
+    container_name = ""
+    session: str | None = None
     try:
         container_name = container_manager.ensure_running(project.project.id)
+        from cairn.dispatcher.tasks.bootstrap import _inject_init_files
+
+        _inject_init_files(container_manager, container_name, project)
 
         if task_healthcheck_enabled(config):
             LOG.info(
@@ -302,6 +308,10 @@ def run_explore_task(
         best_effort_release(client, project.project.id, intent.id, worker.name)
         return "failed"
     finally:
+        if container_name:
+            save_session_log(
+                container_manager, container_name, project.project.id, worker.name, session, phase="explore"
+            )
         lease.stop()
 
 

@@ -58,11 +58,18 @@ class LocalBackend:
         )
 
     def write_text_file(self, container_name: str, path: str, content: str) -> None:
+        target = self._local_target(path)
+        target.write_text(content, encoding="utf-8")
+
+    def write_binary_file(self, container_name: str, path: str, data: bytes) -> None:
+        self._local_target(path).write_bytes(data)
+
+    def _local_target(self, path: str) -> Path:
         target = Path(path)
         if not target.is_absolute():
             raise ValueError(f"local file path must be absolute: {path}")
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        return target
 
     def needs_completed_cleanup(self, project_id: str) -> bool:
         return self._config.completed_action == "remove" and self._project_dir(project_id).exists()

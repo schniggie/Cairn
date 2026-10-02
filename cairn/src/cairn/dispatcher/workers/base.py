@@ -24,6 +24,15 @@ class AnalysisResponse:
 
 
 @dataclass(slots=True)
+class TrajectoryStep:
+    step_id: int
+    action: str
+    observation: str | None = None
+    tool_type: str | None = None
+    thinking: str | None = None
+
+
+@dataclass(slots=True)
 class DriverResult:
     argv: list[str]
     session: str | None = None
@@ -63,6 +72,13 @@ class WorkerDriver(abc.ABC):
     def build_conclude(self, worker: WorkerConfig, prompt: str, session: str) -> DriverResult:
         raise NotImplementedError
 
+    @staticmethod
+    def model_args(worker: WorkerConfig) -> list[str]:
+        """Optional per-worker model override. Empty when ``worker.model`` is unset."""
+        if worker.model:
+            return ["--model", worker.model]
+        return []
+
     def extract_session(self, session: str | None, stdout: str, stderr: str) -> str | None:
         return session
 
@@ -72,6 +88,10 @@ class WorkerDriver(abc.ABC):
     def extract_analysis_response(self, stdout: str, stderr: str) -> AnalysisResponse:
         """Extract structured analysis text and bounded, non-secret execution metadata."""
         return AnalysisResponse(text=self.extract_response_text(stdout, stderr))
+
+    def extract_trajectory(self, session_data: str) -> list[TrajectoryStep]:
+        """Parse a raw session log into trajectory steps. Drivers override this."""
+        return []
 
 
 class SeedSessionDriver(WorkerDriver):

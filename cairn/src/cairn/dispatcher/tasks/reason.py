@@ -24,6 +24,7 @@ from cairn.dispatcher.tasks.common import (
     latest_blocked_action,
     preview,
     run_worker_process,
+    save_session_log,
     SafetyRunContext,
     task_healthcheck_enabled,
     write_graph_snapshot_reference,
@@ -52,6 +53,8 @@ def run_reason_task(
         config.runtime.heartbeat_failure_grace or config.runtime.interval * 2,
     )
     lease.start()
+    container_name = ""
+    session: str | None = None
     try:
         container_name = container_manager.ensure_running(project.project.id)
 
@@ -308,5 +311,9 @@ def run_reason_task(
         )
         return "success"
     finally:
+        if container_name:
+            save_session_log(
+                container_manager, container_name, project.project.id, worker.name, session, phase="reason"
+            )
         lease.stop()
         best_effort_release_reason(client, project.project.id, worker.name)

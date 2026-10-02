@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 from cairn.dispatcher.config import DispatchConfig, SafetyConfig, WorkerConfig, resolve_safety_token
 from cairn.dispatcher.protocol.client import CairnClient
@@ -18,6 +20,7 @@ from cairn.server.models import AuditEvent, AuditEventCreate
 PROCESS_COMMUNICATE_GRACE_SECONDS = 15
 LOG_PREVIEW_LIMIT = 1200
 GRAPH_SNAPSHOT_ROOT = "/tmp/cairn-prompts"
+TRAJECTORY_DIR = Path(os.environ.get("CAIRN_TRAJECTORY_DIR", "trajectories"))
 LOG = logging.getLogger(__name__)
 SAFETY_FALLBACK_PREFIX = "CAIRN_SAFETY_FALLBACK "
 
@@ -160,6 +163,48 @@ def task_healthcheck_enabled(config: DispatchConfig) -> bool:
     if config.runtime.execution == "local":
         return False
     return config.runtime.worker_healthcheck == "startup_and_task"
+
+
+def save_session_log(
+    container_manager: object,
+    container_name: str,
+    project_id: str,
+    worker_name: str,
+    session: str | None,
+    *,
+    phase: str,
+) -> None:
+    """Copy worker session logs out before container cleanup so trajectories survive."""
+    if not session or not hasattr(container_manager, "build_exec_process"):
+        return
+    try:
+        find_result = container_manager.build_exec_process(  # type: ignore[attr-defined]
+            container_name,
+            {},
+            ["find", "/tmp", "-name", "*.jsonl"],
+        )
+        find_result.start()
+        find_output = find_result.communicate(timeout=10)
+        if find_output.returncode != 0 or not find_output.stdout.strip():
+            return
+        out_dir = TRAJECTORY_DIR / project_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for session_path in find_output.stdout.strip().split("\n"):
+            session_path = session_path.strip()
+            if not session_path:
+                continue
+            cat_result = container_manager.build_exec_process(  # type: ignore[attr-defined]
+                container_name, {}, ["cat", session_path]
+            )
+            cat_result.start()
+            cat_output = cat_result.communicate(timeout=30)
+            if cat_output.returncode != 0 or not cat_output.stdout:
+                continue
+            dest = out_dir / f"{phase}_{worker_name}_{Path(session_path).name}"
+            dest.write_text(cat_output.stdout, encoding="utf-8")
+            LOG.info("saved session log project=%s worker=%s phase=%s path=%s", project_id, worker_name, phase, dest)
+    except Exception:
+        LOG.debug("failed to save session log project=%s worker=%s", project_id, worker_name, exc_info=True)
 
 
 def persist_http_records(

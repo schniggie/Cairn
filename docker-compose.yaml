@@ -11,12 +11,13 @@ services:
       - ./datas/cairn/:/root/.local/share/cairn/
     environment:
       CAIRN_SAFETY_TOKEN: "${CAIRN_SAFETY_TOKEN:-}"
+      CAIRN_ADMIN_TOKEN: "${CAIRN_ADMIN_TOKEN:-}"
     healthcheck:
       test:
         - "CMD"
         - "python"
         - "-c"
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/projects', timeout=5)"
+        - "import os,urllib.request; token=os.environ.get('CAIRN_ADMIN_TOKEN',''); req=urllib.request.Request('http://127.0.0.1:8000/projects', headers={'Authorization':'Bearer '+token} if token else {}); urllib.request.urlopen(req, timeout=5)"
       interval: 10s
       timeout: 5s
       retries: 12
@@ -34,6 +35,7 @@ services:
       - ./dispatch.yaml:/cairn/dispatch.yaml
     environment:
       CAIRN_SAFETY_TOKEN: "${CAIRN_SAFETY_TOKEN:-}"
+      CAIRN_ADMIN_TOKEN: "${CAIRN_ADMIN_TOKEN:-}"
     depends_on:
       cairn-server:
         condition: service_healthy

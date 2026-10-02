@@ -8,7 +8,7 @@ import tempfile
 from typing import Any
 
 from cairn.dispatcher.config import WorkerConfig
-from cairn.dispatcher.workers.base import DriverResult, RuntimeAsset, WorkerDriver
+from cairn.dispatcher.workers.base import DriverResult, RuntimeAsset, TrajectoryStep, WorkerDriver
 from cairn.dispatcher.workers.health import HealthResult, http_ping, proxies_from_env
 
 
@@ -70,7 +70,7 @@ class PiDriver(WorkerDriver):
             "--provider",
             "cairn",
             "--model",
-            env["PI_MODEL"],
+            worker.model or env["PI_MODEL"],
             "--mode",
             "json",
         ]
@@ -98,7 +98,7 @@ class PiDriver(WorkerDriver):
             "--provider",
             "cairn",
             "--model",
-            env["PI_MODEL"],
+            worker.model or env["PI_MODEL"],
             "--mode",
             "json",
         ]
@@ -126,6 +126,7 @@ class PiDriver(WorkerDriver):
         pi_argv = [
             "--mode",
             "json",
+            *self.model_args(worker),
         ]
         pi_argv.extend(self._thinking_args(worker))
         pi_argv.extend(
@@ -271,6 +272,57 @@ class PiDriver(WorkerDriver):
             if isinstance(payload, dict):
                 events.append(payload)
         return events
+
+    def extract_trajectory(self, session_data: str) -> list[TrajectoryStep]:
+        steps: list[TrajectoryStep] = []
+        pending_calls: dict[str, dict[str, str]] = {}
+        step_id = 0
+        for event in self._iter_events(session_data):
+            msg = event.get("message", {})
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "assistant" and isinstance(content, list):
+                thinking_text = ""
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") == "thinking":
+                        thinking_text = str(item.get("thinking", ""))
+                    elif item.get("type") == "text":
+                        thinking_text = thinking_text or str(item.get("text", ""))
+                    elif item.get("type") in ("tool_use", "toolCall"):
+                        call_id = str(item.get("toolCallId") or item.get("id", ""))
+                        tool_input = item.get("input") or item.get("arguments") or {}
+                        if isinstance(tool_input, dict):
+                            action = (
+                                str(tool_input.get("command", "") or tool_input.get("content", "") or tool_input.get("path", ""))
+                                or json.dumps(tool_input, ensure_ascii=False)[:2000]
+                            )
+                        else:
+                            action = str(tool_input)[:2000]
+                        pending_calls[call_id] = {"name": str(item.get("name", "")), "action": action, "thinking": thinking_text}
+                        thinking_text = ""
+            elif role == "toolResult" and isinstance(content, list):
+                observation = "\n".join(
+                    item.get("text", "") for item in content if isinstance(item, dict) and item.get("type") == "text"
+                )[:8000]
+                call_info = pending_calls.pop(str(msg.get("toolCallId", "")), None)
+                step_id += 1
+                if call_info:
+                    steps.append(
+                        TrajectoryStep(
+                            step_id=step_id,
+                            action=call_info["action"],
+                            observation=observation,
+                            tool_type=call_info["name"],
+                            thinking=call_info.get("thinking") or None,
+                        )
+                    )
+                else:
+                    steps.append(TrajectoryStep(step_id=step_id, action="[unknown tool call]", observation=observation))
+        return steps
 
     @staticmethod
     def _models_json(worker: WorkerConfig) -> str:

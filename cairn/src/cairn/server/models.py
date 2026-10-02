@@ -143,11 +143,33 @@ class ProjectSummary(ProjectMeta):
     hint_count: int
 
 
+class InitFile(BaseModel):
+    id: str
+    path: str
+    content: str
+    encoding: str = "utf-8"
+
+
 class ProjectDetail(BaseModel):
     project: ProjectMeta
     facts: list[Fact]
     intents: list[Intent]
     hints: list[Hint]
+    init_files: list[InitFile] = []
+
+
+class CreateInitFileInline(BaseModel):
+    path: str
+    content: str
+    encoding: str = "utf-8"
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("path must not be empty")
+        return text
 
 
 class CreateHintInline(BaseModel):
@@ -170,6 +192,7 @@ class CreateProjectRequest(BaseModel):
     bootstrap_enabled: bool = True
     difficulty: str | None = None
     hints: list[CreateHintInline] | None = None
+    init_files: list[CreateInitFileInline] | None = None
 
     @field_validator("title", "origin", "goal")
     @classmethod

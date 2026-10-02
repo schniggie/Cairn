@@ -232,6 +232,17 @@ class WorkerConfig(BaseModel):
     priority: int = Field(ge=0)
     env: dict[str, str] = Field(default_factory=dict)
     difficulties: list[str] | None = None
+    model: str | None = None
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            raise ValueError("model must not be empty")
+        return text
 
     @field_validator("task_types")
     @classmethod

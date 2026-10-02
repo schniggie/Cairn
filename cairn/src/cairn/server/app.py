@@ -1,9 +1,11 @@
 from contextlib import asynccontextmanager
+import os
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from cairn import __version__
 from cairn.server import db
@@ -26,6 +28,34 @@ from cairn.server.routers import (
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
+ADMIN_TOKEN = os.environ.get("CAIRN_ADMIN_TOKEN", "")
+# Workers still POST their own graph updates. Listing and export stay behind the token
+# so one project cannot read another project's flags.
+_WORKER_WRITE_SUFFIXES = (
+    "/heartbeat",
+    "/claim",
+    "/release",
+    "/conclude",
+    "/complete",
+    "/intents",
+    "/facts",
+    "/hints",
+    "/fail",
+    "/events",
+    "/http-records",
+)
+
+
+class AdminTokenMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if ADMIN_TOKEN and request.url.path.startswith("/projects"):
+            path = request.url.path
+            if request.method == "POST" and any(path.endswith(suffix) for suffix in _WORKER_WRITE_SUFFIXES):
+                return await call_next(request)
+            token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+            if token != ADMIN_TOKEN:
+                return Response(status_code=403, content="Forbidden")
+        return await call_next(request)
 
 
 @asynccontextmanager
@@ -40,6 +70,9 @@ app = FastAPI(
     version=__version__,
     lifespan=lifespan,
 )
+
+if ADMIN_TOKEN:
+    app.add_middleware(AdminTokenMiddleware)
 
 app.include_router(settings.router)
 app.include_router(projects.router)

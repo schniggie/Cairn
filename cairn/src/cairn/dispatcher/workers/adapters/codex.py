@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
+
 from cairn.dispatcher.config import WorkerConfig
-from cairn.dispatcher.workers.base import DriverResult, RegexSessionDriver
+from cairn.dispatcher.workers.base import DriverResult, RegexSessionDriver, TrajectoryStep
 from cairn.dispatcher.workers.health import HealthResult, http_ping, proxies_from_env
 
 
@@ -41,6 +43,7 @@ class CodexDriver(RegexSessionDriver):
                     "codex",
                     "exec",
                     "--dangerously-bypass-approvals-and-sandbox",
+                    *self.model_args(worker),
                     "--",
                     "-",
                 ],
@@ -53,7 +56,7 @@ class CodexDriver(RegexSessionDriver):
                 "exec",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--model",
-                env["CODEX_MODEL"],
+                worker.model or env["CODEX_MODEL"],
                 "-c",
                 'model_provider="cairn"',
                 "-c",
@@ -81,6 +84,7 @@ class CodexDriver(RegexSessionDriver):
                     "resume",
                     session,
                     "--dangerously-bypass-approvals-and-sandbox",
+                    *self.model_args(worker),
                     "--",
                     "-",
                 ],
@@ -96,7 +100,7 @@ class CodexDriver(RegexSessionDriver):
                 session,
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--model",
-                env["CODEX_MODEL"],
+                worker.model or env["CODEX_MODEL"],
                 "-c",
                 'model_provider="cairn"',
                 "-c",
@@ -137,3 +141,55 @@ class CodexDriver(RegexSessionDriver):
             + worker.env["CODEX_MODEL"]
             + '","stream":false}'
         )
+
+    def extract_trajectory(self, session_data: str) -> list[TrajectoryStep]:
+        steps: list[TrajectoryStep] = []
+        pending_calls: dict[str, dict[str, str]] = {}
+        step_id = 0
+        for line in session_data.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            msg = event.get("message", event)
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "assistant":
+                tool_calls = msg.get("tool_calls") or []
+                if isinstance(tool_calls, list):
+                    for call in tool_calls:
+                        if not isinstance(call, dict):
+                            continue
+                        function = call.get("function") if isinstance(call.get("function"), dict) else {}
+                        raw_args = function.get("arguments", "{}")
+                        try:
+                            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                        except json.JSONDecodeError:
+                            args = {"raw": raw_args}
+                        if isinstance(args, dict):
+                            action = args.get("command", "") or args.get("content", "") or json.dumps(args, ensure_ascii=False)[:2000]
+                        else:
+                            action = str(args)[:2000]
+                        pending_calls[str(call.get("id", ""))] = {"name": str(function.get("name", "")), "action": str(action)}
+            elif role in ("tool", "function"):
+                call_info = pending_calls.pop(str(msg.get("tool_call_id", "")), None)
+                if not call_info:
+                    continue
+                observation = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+                step_id += 1
+                steps.append(
+                    TrajectoryStep(
+                        step_id=step_id,
+                        action=call_info["action"],
+                        observation=observation[:8000],
+                        tool_type=call_info["name"],
+                    )
+                )
+        return steps

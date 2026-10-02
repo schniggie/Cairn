@@ -7,6 +7,7 @@ from cairn.server.models import (
     CreateProjectRequest,
     Fact,
     Hint,
+    InitFile,
     HeartbeatRequest,
     Intent,
     ProjectDetail,
@@ -107,6 +108,16 @@ def create_project(body: CreateProjectRequest):
                 )
                 hints.append(Hint(id=hid, content=h.content, creator=h.creator, created_at=now))
 
+        init_files = []
+        if body.init_files:
+            for index, item in enumerate(body.init_files, 1):
+                file_id = f"file_{index:03d}"
+                conn.execute(
+                    "INSERT INTO init_files (id, project_id, path, content, encoding) VALUES (?, ?, ?, ?, ?)",
+                    (file_id, pid, item.path, item.content, item.encoding),
+                )
+                init_files.append(InitFile(id=file_id, path=item.path, content=item.content, encoding=item.encoding))
+
         insert_runtime_event(
             conn,
             project_id=pid,
@@ -134,6 +145,7 @@ def create_project(body: CreateProjectRequest):
             ],
             intents=[],
             hints=hints,
+            init_files=init_files,
         )
 
 
@@ -151,12 +163,17 @@ def get_project(project_id: str):
             "SELECT * FROM hints WHERE project_id = ? ORDER BY created_at",
             (project_id,),
         ).fetchall()
+        init_file_rows = conn.execute(
+            "SELECT id, path, content, encoding FROM init_files WHERE project_id = ?",
+            (project_id,),
+        ).fetchall()
 
         return ProjectDetail(
             project=project_meta_from_row(row),
             facts=[Fact(**dict(f)) for f in facts],
             intents=build_intents(conn, project_id),
             hints=[Hint(**dict(h)) for h in hints],
+            init_files=[InitFile(**dict(item)) for item in init_file_rows],
         )
 
 

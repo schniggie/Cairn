@@ -26,6 +26,7 @@ from cairn.dispatcher.tasks.common import (
     project_allows_conclude_fallback,
     preview,
     run_worker_process,
+    save_session_log,
     SafetyRunContext,
     task_healthcheck_enabled,
     write_conclude_result,
@@ -57,8 +58,11 @@ def run_bootstrap_task(
         config.runtime.heartbeat_failure_grace or config.runtime.interval * 2,
     )
     lease.start()
+    container_name = ""
+    session: str | None = None
     try:
         container_name = container_manager.ensure_running(project.project.id)
+        _inject_init_files(container_manager, container_name, project)
 
         if task_healthcheck_enabled(config):
             LOG.info(
@@ -303,6 +307,10 @@ def run_bootstrap_task(
         best_effort_release(client, project.project.id, intent.id, worker.name)
         return "failed"
     finally:
+        if container_name:
+            save_session_log(
+                container_manager, container_name, project.project.id, worker.name, session, phase="bootstrap"
+            )
         lease.stop()
 
 
@@ -621,3 +629,18 @@ def _write_bootstrap_complete_result(
             total_ms,
         )
     return "success"
+
+
+def _inject_init_files(container_manager, container_name: str, project) -> None:
+    """Write project init_files into the worker workspace before execution."""
+    import base64
+
+    init_files = getattr(project, "init_files", None) or []
+    for item in init_files:
+        try:
+            if item.encoding == "base64":
+                container_manager.write_binary_file(container_name, item.path, base64.b64decode(item.content))
+            else:
+                container_manager.write_text_file(container_name, item.path, item.content)
+        except Exception as exc:
+            LOG.warning("failed to inject init_file path=%s project=%s error=%s", item.path, project.project.id, exc)

@@ -34,7 +34,7 @@ class GeminiDriver(WorkerDriver):
         )
 
     def _model_args(self, worker: WorkerConfig) -> list[str]:
-        model = worker.env.get("GEMINI_MODEL", "").strip()
+        model = (worker.model or worker.env.get("GEMINI_MODEL", "")).strip()
         if not model:
             return []
         return ["--model", model]
