@@ -172,7 +172,9 @@ def test_settings_and_export_are_backed_by_the_same_database(client: TestClient)
 
     response = client.put("/settings", json={"intent_timeout": 30, "reason_timeout": 45})
     assert response.status_code == 200
-    assert client.get("/settings").json() == {"intent_timeout": 30, "reason_timeout": 45}
+    settings = client.get("/settings").json()
+    assert settings["intent_timeout"] == 30
+    assert settings["reason_timeout"] == 45
 
     exported = client.get(f"/projects/{project_id}/export?format=yaml")
     assert exported.status_code == 200

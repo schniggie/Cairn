@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import signal
 import subprocess
+import sys
 import threading
 from contextlib import suppress
 
@@ -59,17 +61,23 @@ class LocalProcess:
         self._kill_lock = threading.Lock()
 
     def start(self) -> None:
+        popen_kwargs: dict[str, object] = {
+            "cwd": self._cwd,
+            "env": self.env,
+            "stdin": subprocess.PIPE if self.stdin is not None else subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
         self._process = subprocess.Popen(
-            self.command,
-            cwd=self._cwd,
-            env=self.env,
-            stdin=subprocess.PIPE if self.stdin is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            start_new_session=True,
+            self._resolve_command(),
+            **popen_kwargs,
         )
         if self.stdin is not None and self._process.stdin is not None:
             self._process.stdin.write(self.stdin)
@@ -132,10 +140,41 @@ class LocalProcess:
                 return
             except subprocess.TimeoutExpired:
                 pass
-            self._signal_group(process, signal.SIGKILL)
+            self._signal_group(process, signal.SIGTERM, force=True)
+
+    def _resolve_command(self) -> list[str]:
+        if os.name != "nt" or not self.command:
+            return self.command
+        executable = self.command[0]
+        env_lower = {key.lower(): value for key, value in self.env.items()}
+        path = env_lower.get("path") or ""
+        pathext = env_lower.get("pathext") or os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD"
+        suffixes = tuple(ext.lower() for ext in pathext.split(";") if ext)
+        candidates = [executable]
+        if not os.path.splitext(executable)[1]:
+            candidates.extend(executable + ext for ext in suffixes)
+        for candidate in candidates:
+            resolved = shutil.which(candidate, path=path)
+            if resolved:
+                if executable.lower() == "python3" and "windowsapps" in resolved.lower():
+                    resolved = sys.executable
+                return [resolved, *self.command[1:]]
+        return self.command
 
     @staticmethod
-    def _signal_group(process: subprocess.Popen[str], sig: int) -> None:
+    def _signal_group(process: subprocess.Popen[str], sig: int, force: bool = False) -> None:
+        if os.name == "nt":
+            with suppress(OSError, subprocess.SubprocessError):
+                command = ["taskkill", "/PID", str(process.pid), "/T"]
+                if force:
+                    command.append("/F")
+                subprocess.run(
+                    command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            return
         try:
             os.killpg(os.getpgid(process.pid), sig)
         except (ProcessLookupError, PermissionError):

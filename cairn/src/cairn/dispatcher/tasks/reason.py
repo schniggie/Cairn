@@ -211,7 +211,7 @@ def run_reason_task(
         try:
             model_output = driver.extract_response_text(result.stdout, result.stderr)
             payload = parse_json_output(model_output)
-            kind, data = validate_reason_payload(
+            reason_result = validate_reason_payload(
                 payload, open_intents_empty=not open_intents, max_intents=config.tasks.reason.max_intents,
             )
         except Exception as exc:
@@ -226,7 +226,7 @@ def run_reason_task(
                 preview(result.stderr),
             )
             return "failed"
-        if kind == "rejected":
+        if reason_result.rejected:
             LOG.warning(
                 "reason rejected project=%s worker=%s execute_ms=%s total_ms=%s stdout_preview=%s",
                 project.project.id,
@@ -236,7 +236,8 @@ def run_reason_task(
                 preview(result.stdout),
             )
             return "rejected"
-        if kind == "complete":
+        if reason_result.complete is not None:
+            data = reason_result.complete
             response = client.complete(project.project.id, data["from"], data["description"], worker.name)
             if response.status_code == 403:
                 LOG.info("project became inactive during reason complete project=%s worker=%s", project.project.id, worker.name)
@@ -259,9 +260,8 @@ def run_reason_task(
                 total_ms,
             )
             return "success"
-        if kind == "intents":
-            created = 0
-            for intent_data in data:
+        created = 0
+        for intent_data in reason_result.intents:
                 response = client.create_intent(project.project.id, intent_data["from"], intent_data["description"], worker.name)
                 if response.status_code == 403:
                     LOG.info("project became inactive during reason intent create project=%s worker=%s created=%s", project.project.id, worker.name, created)
@@ -286,30 +286,110 @@ def run_reason_task(
                     intent_data["from"],
                     intent_data["description"],
                 )
-            LOG.info(
-                "reason finished project=%s worker=%s created_intents=%s/%s execute_ms=%s total_ms=%s",
-                project.project.id,
-                worker.name,
-                created,
-                len(data),
-                execute_ms,
-                total_ms,
-            )
-            if created == 0:
+        intervention_count = 0
+        for intervention in reason_result.interventions:
+            if intervention.get("type") != "auth":
+                intervention_count += 1
+                continue
+            auth_ref = intervention["target"]
+            role = intervention["role"]
+            if config.auth is None or not config.auth.intervention.enabled:
                 LOG.warning(
-                    "reason created no intents project=%s worker=%s attempted=%s execute_ms=%s total_ms=%s",
+                    "reason auth request blocked because auth intervention is disabled project=%s worker=%s auth_ref=%s",
                     project.project.id,
                     worker.name,
-                    len(data),
+                    auth_ref,
+                )
+                intervention_count += 1
+                continue
+            try:
+                target_cfg = config.auth.target(auth_ref)
+            except KeyError:
+                LOG.warning(
+                    "reason auth request skipped unknown target project=%s worker=%s auth_ref=%s",
+                    project.project.id,
+                    worker.name,
+                    auth_ref,
+                )
+                intervention_count += 1
+                continue
+            role = target_cfg.role
+            allowed = config.auth.intervention.allow_roles
+            if allowed and role not in allowed:
+                LOG.warning(
+                    "reason auth request blocked by allow_roles project=%s worker=%s auth_ref=%s role=%s",
+                    project.project.id,
+                    worker.name,
+                    auth_ref,
+                    role,
+                )
+                intervention_count += 1
+                continue
+            if config.auth_control_plane_mode != "legacy":
+                response = client.create_auth_request_internal(
+                    project_id=project.project.id,
+                    source_fact_ids=intervention["from"],
+                    auth_ref=auth_ref,
+                )
+            else:
+                response = client.create_auth_request(
+                    project_id=project.project.id,
+                    source_fact_ids=intervention["from"],
+                    auth_ref=auth_ref,
+                    role=role,
+                    login_url=None,
+                    reason=intervention["reason"],
+                )
+            if response.status_code == 409:
+                LOG.info(
+                    "reason auth request deduped project=%s worker=%s auth_ref=%s",
+                    project.project.id,
+                    worker.name,
+                    auth_ref,
+                )
+                intervention_count += 1
+                continue
+            if not response.ok:
+                LOG.warning(
+                    "reason auth request create failed project=%s worker=%s status=%s body=%s",
+                    project.project.id,
+                    worker.name,
+                    response.status_code,
+                    response.text,
+                )
+                continue
+            intervention_count += 1
+            LOG.info(
+                "reason created auth request project=%s worker=%s auth_ref=%s role=%s",
+                project.project.id,
+                worker.name,
+                auth_ref,
+                role,
+            )
+        if created == 0 and intervention_count == 0:
+            if reason_result.is_noop:
+                LOG.info(
+                    "reason finished without graph change project=%s worker=%s execute_ms=%s total_ms=%s",
+                    project.project.id,
+                    worker.name,
                     execute_ms,
                     total_ms,
                 )
-                return "failed"
-            return "success"
+                return "success"
+            LOG.warning(
+                "reason created no intents or interventions project=%s worker=%s execute_ms=%s total_ms=%s",
+                project.project.id,
+                worker.name,
+                execute_ms,
+                total_ms,
+            )
+            return "failed"
         LOG.info(
-            "reason finished without graph change project=%s worker=%s execute_ms=%s total_ms=%s",
+            "reason finished project=%s worker=%s created_intents=%s created_interventions=%s execute_ms=%s total_ms=%s",
             project.project.id,
             worker.name,
+            created,
+            intervention_count,
             execute_ms,
             total_ms,
         )

@@ -1,8 +1,54 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from cairn.dispatcher.output_parser import extract_json_object
+
+
+@dataclass(slots=True)
+class ReasonResult:
+    complete: dict[str, Any] | None = None
+    intents: list[dict[str, Any]] | None = None
+    interventions: list[dict[str, Any]] | None = None
+    rejected: bool = False
+
+    def __post_init__(self) -> None:
+        if self.intents is None:
+            self.intents = []
+        if self.interventions is None:
+            self.interventions = []
+
+    @property
+    def is_noop(self) -> bool:
+        return (
+            not self.rejected
+            and self.complete is None
+            and not self.intents
+            and not self.interventions
+        )
+
+
+def validate_intervention(item: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        raise ValueError("intervention must be an object")
+    if item.get("type") != "auth":
+        raise ValueError(f"unsupported intervention type: {item.get('type')!r}")
+    required = {"from", "target", "role", "reason"}
+    missing = required - set(item)
+    if missing:
+        raise ValueError(f"missing intervention fields: {sorted(missing)}")
+    if not isinstance(item["from"], list) or not item["from"]:
+        raise ValueError("intervention from must be a non-empty array")
+    if not isinstance(item["target"], str) or not item["target"].strip():
+        raise ValueError("intervention target must be a non-empty string")
+    if not isinstance(item["role"], str) or not item["role"].strip():
+        raise ValueError("intervention role must be a non-empty string")
+    if not isinstance(item["reason"], str) or not item["reason"].strip():
+        raise ValueError("intervention reason must be a non-empty string")
+    if "login_url" in item and item["login_url"] is not None and not isinstance(item["login_url"], str):
+        raise ValueError("intervention login_url must be a string or null")
+    return item
 
 
 def detach_http_records(payload: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -75,6 +121,10 @@ def _looks_like_reason_data(payload: dict[str, Any]) -> bool:
         return isinstance(complete, dict) and "from" in complete and "description" in complete
     if keys == {"intents"}:
         return isinstance(payload["intents"], list)
+    if keys == {"interventions"}:
+        return isinstance(payload["interventions"], list)
+    if keys == {"intents", "interventions"}:
+        return isinstance(payload["intents"], list) and isinstance(payload["interventions"], list)
     if keys == {"intent"}:
         intent = payload["intent"]
         return isinstance(intent, dict) and "from" in intent and "description" in intent
@@ -102,10 +152,10 @@ def _looks_like_explore_data(payload: dict[str, Any]) -> bool:
 
 def validate_reason_payload(
     payload: dict[str, Any], open_intents_empty: bool, max_intents: int,
-) -> tuple[str, dict[str, Any] | list[dict[str, Any]] | None]:
+) -> ReasonResult:
     accepted, data = _unwrap_wrapped_payload(payload)
     if accepted is False:
-        return "rejected", None
+        return ReasonResult(rejected=True)
     if accepted is None:
         if not _looks_like_reason_data(payload):
             raise ValueError("accepted must be true or false")
@@ -114,32 +164,39 @@ def validate_reason_payload(
         raise ValueError("accepted must be true or false")
     complete = data.get("complete")
     intents = data.get("intents")
-    # backward compat: accept singular "intent" key from LLMs
+    interventions = data.get("interventions")
     if intents is None:
         singular = data.get("intent")
         if isinstance(singular, dict):
             intents = [singular]
     if complete is not None:
-        if intents is not None:
-            raise ValueError("complete and intents cannot coexist")
+        if intents is not None or interventions is not None:
+            raise ValueError("complete cannot coexist with intents or interventions")
         if not isinstance(complete, dict) or "from" not in complete or "description" not in complete:
             raise ValueError("invalid complete payload")
-        return "complete", complete
+        return ReasonResult(complete=complete)
+    validated_interventions: list[dict[str, Any]] = []
+    if interventions is not None:
+        if not isinstance(interventions, list):
+            raise ValueError("interventions must be an array")
+        for index, intervention in enumerate(interventions):
+            try:
+                validated_interventions.append(validate_intervention(intervention))
+            except ValueError as exc:
+                raise ValueError(f"invalid intervention at index {index}: {exc}") from exc
+    validated_intents: list[dict[str, Any]] = []
     if intents is not None:
         if not isinstance(intents, list):
             raise ValueError("intents must be an array")
-        for i, intent in enumerate(intents):
+        for index, intent in enumerate(intents):
             if not isinstance(intent, dict) or "from" not in intent or "description" not in intent:
-                raise ValueError(f"invalid intent at index {i}")
-        if not intents and open_intents_empty:
-            raise ValueError("intents must not be empty when open_intents is empty")
-        intents = intents[:max_intents]
-        if not intents:
-            return "noop", None
-        return "intents", intents
-    if open_intents_empty:
-        raise ValueError("intents is required when open_intents is empty")
-    return "noop", None
+                raise ValueError(f"invalid intent at index {index}")
+        validated_intents = intents[:max_intents]
+    if not validated_intents and not validated_interventions:
+        if open_intents_empty:
+            raise ValueError("intents or interventions is required when open_intents is empty")
+        return ReasonResult()
+    return ReasonResult(intents=validated_intents, interventions=validated_interventions)
 
 
 def validate_bootstrap_execute_payload(payload: dict[str, Any]) -> tuple[str, dict[str, str] | None]:

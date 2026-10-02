@@ -35,9 +35,10 @@ class ApiResult:
 
 
 class CairnClient:
-    def __init__(self, base_url: str, timeout: float = 10.0):
+    def __init__(self, base_url: str, timeout: float = 10.0, server_token: str | None = None):
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._server_token = server_token
         self._summary_adapter = TypeAdapter(list[ProjectSummary])
         self._local = threading.local()
         self._sessions: dict[int, requests.Session] = {}
@@ -172,11 +173,18 @@ class CairnClient:
             json={"from": from_ids, "description": description, "worker": worker},
         )
 
-    def create_intent(self, project_id: str, from_ids: list[str], description: str, creator: str) -> ApiResult:
+    def create_intent(
+        self,
+        project_id: str,
+        from_ids: list[str],
+        description: str,
+        creator: str,
+        worker: str | None = None,
+    ) -> ApiResult:
         return self._request_json(
             "POST",
             f"/projects/{project_id}/intents",
-            json={"from": from_ids, "description": description, "creator": creator, "worker": None},
+            json={"from": from_ids, "description": description, "creator": creator, "worker": worker},
         )
 
     def create_runtime_event(
@@ -271,6 +279,192 @@ class CairnClient:
             },
         )
 
+    def bootstrap_auth_deployment(self, snapshot: dict[str, Any]) -> ApiResult:
+        """Apply the Dispatcher-owned auth deployment snapshot on the Server."""
+        return self._request_json(
+            "POST",
+            "/internal/auth/deployment",
+            json=snapshot,
+        )
+
+
+    def create_auth_request_internal(
+        self,
+        project_id: str,
+        source_fact_ids: list[str],
+        auth_ref: str,
+    ) -> ApiResult:
+        return self._request_json(
+            "POST",
+            "/internal/auth/requests",
+            json={
+                "project_id": project_id,
+                "source_fact_ids": source_fact_ids,
+                "auth_ref": auth_ref,
+            },
+        )
+
+
+    def claim_auth_event(self, dispatcher_id: str) -> ApiResult:
+        return self._request_json(
+            "POST", "/internal/auth/events/claim", json={"dispatcher_id": dispatcher_id}
+        )
+
+
+    def apply_auth_event(
+        self,
+        event_id: str,
+        dispatcher_id: str,
+        *,
+        operation: str,
+        outcome_code: str | None = None,
+    ) -> ApiResult:
+        body: dict[str, Any] = {
+            "event_id": event_id,
+            "dispatcher_id": dispatcher_id,
+            "operation": operation,
+        }
+        if outcome_code is not None:
+            body["outcome_code"] = outcome_code
+        return self._request_json("POST", "/internal/auth/events/apply", json=body)
+
+
+    def recover_auth_events(self) -> ApiResult:
+        return self._request_json("POST", "/internal/auth/events/recover", json={})
+
+
+    def expire_auth_requests(self) -> ApiResult:
+        return self._request_json("POST", "/internal/auth/requests/expire", json={})
+
+
+    def create_auth_graph_intent(
+        self,
+        project_id: str,
+        source_key: str,
+        source_fact_ids: list[str],
+        description: str,
+        *,
+        creator: str = "operator.auth",
+        worker: str = "operator.auth",
+    ) -> ApiResult:
+        return self._request_json(
+            "POST",
+            "/internal/auth/graph/intents",
+            json={
+                "project_id": project_id,
+                "source_key": source_key,
+                "source_fact_ids": source_fact_ids,
+                "description": description,
+                "creator": creator,
+                "worker": worker,
+            },
+        )
+
+
+    def get_auth_graph_intent(self, project_id: str, source_key: str) -> ApiResult:
+        return self._request_json(
+            "GET", f"/internal/auth/graph/intents/{project_id}", json={"source_key": source_key}
+        )
+
+
+    def conclude_auth_graph_intent(
+        self,
+        project_id: str,
+        intent_source_key: str,
+        fact_source_key: str,
+        worker: str,
+        description: str,
+    ) -> ApiResult:
+        result = self._request_json(
+            "POST",
+            "/internal/auth/graph/conclude",
+            json={
+                "project_id": project_id,
+                "intent_source_key": intent_source_key,
+                "fact_source_key": fact_source_key,
+                "worker": worker,
+                "description": description,
+            },
+        )
+        if isinstance(result.data, dict):
+            fact = result.data.get("fact")
+            fact_id = result.data.get("fact_id") or (fact.get("id") if isinstance(fact, dict) else None)
+            if fact_id:
+                self._last_auth_graph_fact_id = str(fact_id)
+        return result
+
+
+    def acknowledge_auth_graph_outbox(
+        self,
+        event_id: str,
+        dispatcher_id: str,
+        *,
+        state: str,
+        intent_id: str | None = None,
+        fact_id: str | None = None,
+        outcome_code: str | None = None,
+    ) -> ApiResult:
+        body: dict[str, Any] = {
+            "event_id": event_id,
+            "dispatcher_id": dispatcher_id,
+            "state": state,
+        }
+        if intent_id is not None:
+            body["intent_id"] = intent_id
+        if fact_id is not None:
+            body["fact_id"] = fact_id
+        if outcome_code is not None:
+            body["outcome_code"] = outcome_code
+        return self._request_json("POST", "/internal/auth/graph/outbox/ack", json=body)
+
+
+    def create_auth_request(
+        self,
+        project_id: str,
+        source_fact_ids: list[str],
+        auth_ref: str,
+        role: str,
+        reason: str,
+        login_url: str | None = None,
+    ) -> ApiResult:
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/auth-requests",
+            json={
+                "source_fact_ids": source_fact_ids,
+                "auth_ref": auth_ref,
+                "role": role,
+                "reason": reason,
+                "login_url": login_url,
+            },
+        )
+
+
+    def list_auth_requests(self, status: str | None = None) -> ApiResult:
+        path = "/auth-requests"
+        if status is not None:
+            path = f"{path}?status={status}"
+        return self._request_json("GET", path, json={})
+
+
+    def list_auth_helper_pending(self, project_id: str) -> ApiResult:
+        """Read the narrow project-scoped view intended for a desktop Helper."""
+        return self._request_json(
+            "GET", f"/projects/{project_id}/auth-requests/helper-pending", json={}
+        )
+
+
+    def get_auth_helper_view(self, project_id: str, request_id: str) -> ApiResult:
+        return self._request_json(
+            "GET", f"/projects/{project_id}/auth-requests/{request_id}/helper-view", json={}
+        )
+
+
+    def create_auth_event(self, body: dict[str, Any]) -> ApiResult:
+        """Enqueue one closed Helper/CLI event for Dispatcher consumption."""
+        return self._request_json("POST", "/auth-events", json=body)
+
+
     def _request_json(
         self,
         method: str,
@@ -278,12 +472,16 @@ class CairnClient:
         json: dict[str, Any],
         headers: dict[str, str] | None = None,
     ) -> ApiResult:
+        request_headers = dict(headers or {})
+        token = self._server_token
+        if token and (path.startswith("/auth") or "/auth-" in path or path.endswith("/auth-deployment")):
+            request_headers["Authorization"] = f"Bearer {token}"
         try:
             response = self._session().request(
                 method,
                 self._url(path),
                 json=json,
-                headers=headers,
+                headers=request_headers or None,
                 timeout=self._timeout,
             )
         except requests.RequestException as exc:
@@ -303,8 +501,9 @@ class CairnClient:
             return session
 
         session = requests.Session()
-        if ADMIN_TOKEN:
-            session.headers["Authorization"] = f"Bearer {ADMIN_TOKEN}"
+        bearer = ADMIN_TOKEN or getattr(self, "_server_token", None)
+        if bearer:
+            session.headers["Authorization"] = f"Bearer {bearer}"
         adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64, pool_block=False)
         session.mount("http://", adapter)
         session.mount("https://", adapter)

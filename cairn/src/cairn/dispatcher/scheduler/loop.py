@@ -11,9 +11,10 @@ from pathlib import Path
 
 import requests
 
+from cairn.dispatcher.auth_control import DispatcherAuthControl
 from cairn.dispatcher.config import DispatchConfig, LocalConfig, WorkerConfig
 from cairn.dispatcher.models import ReasonCheckpoint, RunningTask
-from cairn.dispatcher.protocol.client import CairnClient
+from cairn.dispatcher.protocol.client import CairnClient, ProtocolError
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.local_backend import LocalBackend
@@ -46,14 +47,15 @@ class DispatcherLoop:
     def __init__(self, config_path: Path):
         self.config_path = config_path
         self.config = DispatchConfig.load(config_path)
-        self.client = CairnClient(self.config.server)
+        self.client = CairnClient(self.config.server, server_token=self.config.server_token)
+        self.auth_control = DispatcherAuthControl(self.client, auth_config=self.config.auth)
         self._override_local: LocalBackend | None = None
         self._override_container: ContainerManager | None = None
         if self.config.runtime.execution == "local":
-            self.container_manager = LocalBackend(self.config.local or LocalConfig())
+            self.container_manager = LocalBackend(self.config.local or LocalConfig(), self.config.auth)
         else:
             assert self.config.container is not None
-            self.container_manager = ContainerManager(self.config.container)
+            self.container_manager = ContainerManager(self.config.container, self.config.auth)
         self.executor = ThreadPoolExecutor(max_workers=self.config.runtime.max_workers)
         self.cleanup_executor = ThreadPoolExecutor(max_workers=max(1, min(8, self.config.runtime.max_workers)))
         self.futures: dict[Future[str], RunningTask] = {}
@@ -68,6 +70,7 @@ class DispatcherLoop:
         self.project_cursor = 0
         self._settings_checked = False
         self._startup_healthchecks_checked = False
+        self._auth_deployment_checked = False
         self._config_mtime_ns = self.config_path.stat().st_mtime_ns
 
     def close(self) -> None:
@@ -101,7 +104,7 @@ class DispatcherLoop:
         if requested == "local":
             override = getattr(self, "_override_local", None)
             if override is None:
-                override = LocalBackend(self.config.local or LocalConfig())
+                override = LocalBackend(self.config.local or LocalConfig(), self.config.auth)
                 self._override_local = override
             return override
         if self.config.container is None:
@@ -109,7 +112,7 @@ class DispatcherLoop:
             return self.container_manager
         override = getattr(self, "_override_container", None)
         if override is None:
-            override = ContainerManager(self.config.container)
+            override = ContainerManager(self.config.container, self.config.auth)
             self._override_container = override
         return override
 
@@ -122,6 +125,12 @@ class DispatcherLoop:
                     if not self._settings_checked:
                         self._validate_server_settings()
                         self._settings_checked = True
+                    self._bootstrap_auth_deployment()
+                    if not self._run_auth_control_cycle():
+                        if once:
+                            raise RuntimeError("authentication control cycle failed")
+                        time.sleep(self.config.runtime.interval)
+                        continue
                     self._reap_futures()
                     self._reap_cleanup_futures()
                     summaries = self.client.list_projects()
@@ -1161,6 +1170,35 @@ class DispatcherLoop:
             if scope.startswith(prefix):
                 self._log_state.pop(scope, None)
 
+    def _bootstrap_auth_deployment(self) -> None:
+        if getattr(self, "_auth_deployment_checked", False):
+            return
+        snapshot = self.config.auth_deployment_snapshot()
+        if not snapshot.get("dispatcher_token") and self.config.auth is None:
+            self._auth_deployment_checked = True
+            return
+        if not snapshot.get("dispatcher_token"):
+            raise RuntimeError("auth deployment requires dispatch config server_token")
+        result = self.client.bootstrap_auth_deployment(snapshot)
+        if not result.ok:
+            raise RuntimeError(
+                f"auth deployment bootstrap failed with server status {result.status_code}"
+            )
+        self._auth_deployment_checked = True
+
+    def _run_auth_control_cycle(self) -> bool:
+        if self.config.auth_control_plane_mode == "legacy":
+            return True
+        control = getattr(self, "auth_control", None)
+        if control is None:
+            return False
+        try:
+            results = control.run_cycle()
+            return all(result.ok for result in results)
+        except (AttributeError, ProtocolError, requests.RequestException):
+            LOG.exception("auth control cycle failed")
+            return False
+
     def _validate_server_settings(self) -> None:
         configured_timeout = self.config.runtime.server_lease_timeout
         settings = (
@@ -1168,6 +1206,23 @@ class DispatcherLoop:
             if configured_timeout is not None
             else self.client.get_settings()
         )
+        server_mode = getattr(settings, "auth_control_plane_mode", "legacy")
+        if self.config.auth_control_plane_mode != server_mode:
+            raise RuntimeError(
+                "dispatcher auth_control_plane_mode must equal server auth_control_plane_mode"
+            )
+        if self.config.auth is not None:
+            intervention = self.config.auth.intervention
+            server_request_ttl = getattr(settings, "auth_request_ttl", intervention.request_ttl)
+            server_claim_ttl = getattr(settings, "auth_claim_ttl", intervention.claim_ttl)
+            if intervention.request_ttl != server_request_ttl:
+                raise RuntimeError(
+                    "dispatcher auth intervention.request_ttl must equal server auth_request_ttl"
+                )
+            if intervention.claim_ttl != server_claim_ttl:
+                raise RuntimeError(
+                    "dispatcher auth intervention.claim_ttl must equal server auth_claim_ttl"
+                )
         interval = self.config.runtime.interval
         effective_grace = self.config.runtime.heartbeat_failure_grace or interval * 2
         for name, value in (("intent_timeout", settings.intent_timeout), ("reason_timeout", settings.reason_timeout)):

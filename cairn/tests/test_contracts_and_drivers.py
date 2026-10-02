@@ -22,7 +22,7 @@ def test_parse_json_output_extracts_object_from_markdown_noise() -> None:
 
 
 def test_reason_payload_limits_number_of_intents() -> None:
-    kind, intents = validate_reason_payload(
+    result = validate_reason_payload(
         {
             "accepted": True,
             "data": {
@@ -36,12 +36,11 @@ def test_reason_payload_limits_number_of_intents() -> None:
         max_intents=1,
     )
 
-    assert kind == "intents"
-    assert intents == [{"from": ["f001"], "description": "one"}]
+    assert result.intents == [{"from": ["f001"], "description": "one"}]
 
 
 def test_reason_payload_requires_intent_when_none_are_open() -> None:
-    with pytest.raises(ValueError, match="intents is required"):
+    with pytest.raises(ValueError, match="intents or interventions is required"):
         validate_reason_payload(
             {"accepted": True, "data": {}},
             open_intents_empty=True,

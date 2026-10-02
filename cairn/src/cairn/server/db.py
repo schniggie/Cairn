@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
@@ -263,6 +265,10 @@ def configure(path: Path) -> None:
         _ensure_fact_columns(conn)
         _ensure_base_knowledge_table(conn)
         _ensure_verify_tables(conn)
+        _ensure_auth_tables(conn)
+        from cairn.server.services import bootstrap_auth_deployment
+
+        bootstrap_auth_deployment(conn)
 
 
 def _ensure_base_knowledge_table(conn: sqlite3.Connection) -> None:
@@ -440,3 +446,316 @@ def get_conn() -> Generator[sqlite3.Connection, None, None]:
         raise
     finally:
         conn.close()
+
+
+AUTH_TABLES = """\
+CREATE TABLE IF NOT EXISTS auth_requests (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    source_fact_ids TEXT NOT NULL,
+    auth_ref TEXT NOT NULL,
+    role TEXT NOT NULL,
+    login_url TEXT,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL,
+    claimed_by TEXT,
+    created_at TEXT NOT NULL,
+    claimed_at TEXT,
+    completed_at TEXT,
+    failure_reason TEXT,
+    helper_actor_id TEXT,
+    expires_at TEXT,
+    expiry_generation INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_requests_project ON auth_requests (project_id, auth_ref);
+
+CREATE TABLE IF NOT EXISTS auth_events (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    auth_ref TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('launch_requested', 'browser_opened', 'login_succeeded', 'login_failed')),
+    actor_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('queued', 'claimed', 'retryable', 'applied', 'rejected')),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    claimed_by TEXT,
+    claim_expires_at TEXT,
+    processed_at TEXT,
+    outcome_code TEXT,
+    capture_generation INTEGER,
+    UNIQUE (actor_id, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_events_queue ON auth_events (state, next_attempt_at, received_at);
+
+CREATE TABLE IF NOT EXISTS auth_lifecycle_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    outcome_code TEXT NOT NULL,
+    UNIQUE (request_id, event_id, kind)
+);
+
+CREATE TABLE IF NOT EXISTS auth_credentials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_digest TEXT NOT NULL UNIQUE,
+    actor_id TEXT NOT NULL,
+    scopes TEXT NOT NULL,
+    project_allowlist TEXT NOT NULL,
+    not_before TEXT NOT NULL,
+    expires_at TEXT,
+    replaced_by TEXT,
+    created_at TEXT NOT NULL,
+    deployment_owned INTEGER NOT NULL DEFAULT 0,
+    deployment_slot TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_credentials_actor ON auth_credentials (actor_id);
+
+CREATE TABLE IF NOT EXISTS auth_credential_cutovers (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    acknowledged_at TEXT NOT NULL,
+    revoked_count INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth_target_configs (
+    auth_ref TEXT PRIMARY KEY,
+    login_url TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth_target_metadata (
+    auth_ref TEXT PRIMARY KEY,
+    role TEXT NOT NULL,
+    request_reason TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth_graph_outbox (
+    event_id TEXT PRIMARY KEY REFERENCES auth_events(id) ON DELETE CASCADE,
+    effect_key TEXT NOT NULL UNIQUE,
+    project_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    auth_ref TEXT NOT NULL,
+    intent_source_key TEXT NOT NULL UNIQUE,
+    fact_source_key TEXT NOT NULL UNIQUE,
+    fact_kind TEXT NOT NULL CHECK (fact_kind IN ('AuthSessionVerified', 'AuthSessionInvalid')),
+    state TEXT NOT NULL CHECK (state IN ('pending', 'intent_created', 'fact_created')),
+    intent_id TEXT,
+    fact_id TEXT,
+    outcome_code TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_graph_outbox_pending
+    ON auth_graph_outbox (state, updated_at);
+"""
+
+
+def _ensure_auth_tables(conn: sqlite3.Connection) -> None:
+    """Create auth-control tables and source-key columns without rewriting SCHEMA."""
+    conn.executescript(AUTH_TABLES)
+    _ensure_settings_columns(conn)
+    _ensure_auth_request_columns(conn)
+    _ensure_auth_credential_columns(conn)
+    _ensure_auth_schema(conn)
+    _ensure_graph_columns(conn)
+
+
+def _ensure_settings_columns(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(settings)")}
+    if "auth_claim_ttl" not in columns:
+        conn.execute(
+            "ALTER TABLE settings ADD COLUMN auth_claim_ttl INTEGER NOT NULL DEFAULT 300"
+        )
+    if "auth_request_ttl" not in columns:
+        conn.execute(
+            "ALTER TABLE settings ADD COLUMN auth_request_ttl INTEGER NOT NULL DEFAULT 1800"
+        )
+    if "auth_control_plane_mode" not in columns:
+        conn.execute(
+            "ALTER TABLE settings ADD COLUMN auth_control_plane_mode TEXT NOT NULL DEFAULT 'legacy'"
+        )
+
+
+def _ensure_auth_request_columns(conn: sqlite3.Connection) -> None:
+    """Add Phase 1 auth request columns to databases created by older Cairn versions."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(auth_requests)")}
+    if "helper_actor_id" not in columns:
+        conn.execute("ALTER TABLE auth_requests ADD COLUMN helper_actor_id TEXT")
+    if "expires_at" not in columns:
+        conn.execute("ALTER TABLE auth_requests ADD COLUMN expires_at TEXT")
+    if "expiry_generation" not in columns:
+        conn.execute(
+            "ALTER TABLE auth_requests ADD COLUMN expiry_generation INTEGER NOT NULL DEFAULT 1"
+        )
+
+    ttl_row = conn.execute(
+        "SELECT auth_request_ttl FROM settings WHERE rowid = 1"
+    ).fetchone()
+    ttl = int(ttl_row["auth_request_ttl"]) if ttl_row is not None else 1800
+    rows = conn.execute(
+        "SELECT id, created_at FROM auth_requests WHERE expires_at IS NULL"
+    ).fetchall()
+    for row in rows:
+        expires_at = _expiry_for(row["created_at"], ttl)
+        conn.execute(
+            "UPDATE auth_requests SET expires_at = ? WHERE id = ?",
+            (expires_at, row["id"]),
+        )
+
+
+def _ensure_auth_credential_columns(conn: sqlite3.Connection) -> None:
+    """Add deployment ownership metadata to pre-existing credential tables."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(auth_credentials)")}
+    if "deployment_owned" not in columns:
+        conn.execute(
+            "ALTER TABLE auth_credentials ADD COLUMN deployment_owned INTEGER NOT NULL DEFAULT 0"
+        )
+    if "deployment_slot" not in columns:
+        conn.execute("ALTER TABLE auth_credentials ADD COLUMN deployment_slot TEXT")
+
+    # Before deployment ownership was recorded, bootstrap_auth_credentials used
+    # the canonical actor/scope metadata below. Only those unambiguous rows are
+    # adopted; operator credentials with similar scopes remain manual.
+    rows = conn.execute(
+        "SELECT id, actor_id, scopes, project_allowlist FROM auth_credentials "
+        "WHERE deployment_owned = 0 AND deployment_slot IS NULL"
+    ).fetchall()
+    for row in rows:
+        try:
+            scopes = json.loads(row["scopes"])
+            projects = json.loads(row["project_allowlist"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        slot = None
+        if (
+            row["actor_id"] == "dispatcher"
+            and scopes == ["dispatcher.auth.consume"]
+            and projects == ["*"]
+        ):
+            slot = "dispatcher"
+        elif (
+            row["actor_id"] == "helper"
+            and scopes == ["helper.event.submit", "helper.request.read"]
+            and projects == ["*"]
+        ):
+            slot = "helper"
+        if slot is not None:
+            conn.execute(
+                "UPDATE auth_credentials SET deployment_owned = 1, deployment_slot = ? WHERE id = ?",
+                (slot, row["id"]),
+            )
+
+
+def _expiry_for(created_at: str, ttl: int) -> str | None:
+    if ttl <= 0:
+        return None
+    try:
+        parsed = datetime.strptime(created_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        parsed = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+    return (parsed + timedelta(seconds=ttl)).astimezone(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def _ensure_auth_schema(conn: sqlite3.Connection) -> None:
+    """Backfill deterministic lifecycle records for pre-event auth requests."""
+    rows = conn.execute(
+        "SELECT id, status, created_at, completed_at FROM auth_requests ORDER BY rowid"
+    ).fetchall()
+    terminal_statuses = {"completed", "failed", "cancelled", "expired"}
+    for row in rows:
+        request_id = row["id"]
+        existing = conn.execute(
+            "SELECT COUNT(*) AS count FROM auth_lifecycle_events WHERE request_id = ?",
+            (request_id,),
+        ).fetchone()
+        if existing["count"]:
+            continue
+        created_at = row["created_at"]
+        conn.execute(
+            """
+            INSERT INTO auth_lifecycle_events
+                (request_id, event_id, sequence, kind, recorded_at, outcome_code)
+            VALUES (?, ?, 1, 'created', ?, 'created')
+            """,
+            (request_id, f"backfill:create:{request_id}", created_at),
+        )
+        if row["status"] in terminal_statuses:
+            recorded_at = row["completed_at"] or created_at
+            conn.execute(
+                """
+                INSERT INTO auth_lifecycle_events
+                    (request_id, event_id, sequence, kind, recorded_at, outcome_code)
+                VALUES (?, ?, 2, ?, ?, ?)
+                """,
+                (
+                    request_id,
+                    f"backfill:terminal:{request_id}",
+                    row["status"],
+                    recorded_at,
+                    row["status"],
+                ),
+            )
+
+
+def _ensure_graph_columns(conn: sqlite3.Connection) -> None:
+    """Add source-key graph identity and the durable auth graph outbox."""
+    fact_columns = {row["name"] for row in conn.execute("PRAGMA table_info(facts)")}
+    if "source_key" not in fact_columns:
+        conn.execute("ALTER TABLE facts ADD COLUMN source_key TEXT")
+    intent_columns = {row["name"] for row in conn.execute("PRAGMA table_info(intents)")}
+    if "source_key" not in intent_columns:
+        conn.execute("ALTER TABLE intents ADD COLUMN source_key TEXT")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_facts_source_key ON facts (project_id, source_key) WHERE source_key IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_intents_source_key ON intents (project_id, source_key) WHERE source_key IS NOT NULL"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS auth_graph_outbox (
+            event_id TEXT PRIMARY KEY REFERENCES auth_events(id) ON DELETE CASCADE,
+            effect_key TEXT NOT NULL UNIQUE,
+            project_id TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            auth_ref TEXT NOT NULL,
+            intent_source_key TEXT NOT NULL UNIQUE,
+            fact_source_key TEXT NOT NULL UNIQUE,
+            fact_kind TEXT NOT NULL DEFAULT 'AuthSessionVerified' CHECK (fact_kind IN ('AuthSessionVerified', 'AuthSessionInvalid')),
+            state TEXT NOT NULL CHECK (state IN ('pending', 'intent_created', 'fact_created')),
+            intent_id TEXT,
+            fact_id TEXT,
+            outcome_code TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    outbox_columns = {row["name"] for row in conn.execute("PRAGMA table_info(auth_graph_outbox)")}
+    if "effect_key" not in outbox_columns:
+        conn.execute("ALTER TABLE auth_graph_outbox ADD COLUMN effect_key TEXT")
+        conn.execute(
+            "UPDATE auth_graph_outbox SET effect_key = 'auth-event:' || event_id WHERE effect_key IS NULL"
+        )
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_auth_graph_effect_key ON auth_graph_outbox (effect_key)")
+    if "fact_kind" not in outbox_columns:
+        conn.execute("ALTER TABLE auth_graph_outbox ADD COLUMN fact_kind TEXT NOT NULL DEFAULT 'AuthSessionVerified'")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_auth_graph_outbox_pending ON auth_graph_outbox (state, updated_at)"
+    )
+

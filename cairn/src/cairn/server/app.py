@@ -28,6 +28,11 @@ from cairn.server.routers import (
     settings,
     skills,
     verify_controls,
+    auth_control,
+    auth_deployment,
+    auth_events,
+    auth_helper_views,
+    auth_requests,
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -98,6 +103,11 @@ app.include_router(research_identities.router)
 app.include_router(research_sources.router)
 app.include_router(research_source_compare.router)
 app.include_router(verify_controls.router)
+app.include_router(auth_requests.router)
+app.include_router(auth_events.router)
+app.include_router(auth_control.router)
+app.include_router(auth_deployment.router)
+app.include_router(auth_helper_views.router)
 
 
 @app.get("/", include_in_schema=False)

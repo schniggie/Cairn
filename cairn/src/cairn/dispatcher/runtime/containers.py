@@ -11,7 +11,7 @@ import docker
 from docker.errors import APIError, DockerException, NotFound
 from docker.models.containers import Container
 
-from cairn.dispatcher.config import ContainerConfig
+from cairn.dispatcher.config import AuthConfig, ContainerConfig
 from cairn.dispatcher.runtime.process import ManagedProcess
 
 LOG = logging.getLogger(__name__)
@@ -20,14 +20,29 @@ LOG = logging.getLogger(__name__)
 class ContainerManager:
     _PREFIX = os.environ.get("CAIRN_CONTAINER_PREFIX", "").strip() or "cairn-dispatch-"
 
-    def __init__(self, config: ContainerConfig):
+    def __init__(self, config: ContainerConfig, auth_config: AuthConfig | None = None):
         self._config = config
+        self._auth_config = auth_config
         self._client = docker.from_env()
         self._ensure_running_locks: dict[str, threading.Lock] = {}
         self._ensure_running_locks_guard = threading.Lock()
 
     def close(self) -> None:
         self._client.close()
+
+    def project_env(self, project_id: str) -> dict[str, str]:
+        env = {"CAIRN_PROJECT_ID": project_id}
+        auth = getattr(self, "_auth_config", None)
+        if auth is not None:
+            env["CAIRN_AUTH_DIR"] = auth.worker_mount_root
+        return env
+
+    def _auth_volumes(self, project_id: str) -> dict[str, dict[str, str]]:
+        auth = getattr(self, "_auth_config", None)
+        if auth is None:
+            return {}
+        host_dir = f"{auth.store_root.rstrip('/')}/{project_id}"
+        return {host_dir: {"bind": auth.worker_mount_root, "mode": "ro"}}
 
     def container_name(self, project_id: str) -> str:
         sanitized = project_id.replace("/", "-")
@@ -85,6 +100,7 @@ class ContainerManager:
                 volumes[str(codebase)] = {"bind": "/codebase", "mode": "ro"}
             else:
                 LOG.warning("codebase path is not a directory: %s", codebase)
+        volumes.update(self._auth_volumes(project_id))
         try:
             self._client.containers.run(
                 self._config.image,

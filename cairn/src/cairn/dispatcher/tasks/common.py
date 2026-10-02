@@ -410,6 +410,9 @@ def run_worker_process(
         container_manager.write_text_file(container_name, asset.path, asset.content)
 
     exec_env = dict(worker.env)
+    project_id = safety_context.project_id if safety_context is not None else None
+    if project_id and hasattr(container_manager, "project_env"):
+        exec_env.update(container_manager.project_env(project_id))
     if safety is not None and safety.enabled and safety_context is not None:
         if safety_context.worker != worker.name:
             raise ValueError("safety context worker does not match worker config")
