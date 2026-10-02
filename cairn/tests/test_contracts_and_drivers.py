@@ -5,6 +5,7 @@ import json
 import pytest
 
 from cairn.dispatcher.contracts import (
+    detach_http_records,
     parse_json_output,
     validate_explore_payload,
     validate_reason_payload,
@@ -127,4 +128,27 @@ def test_important_json_line_buffer_discards_oversized_lines() -> None:
     buffer.append('{"type":"session","id":"s"}\n')
 
     assert '"id":"s"' in buffer.value()
+
+
+def test_http_records_detach_without_changing_legacy_payload() -> None:
+    payload, records = detach_http_records(
+        {
+            "accepted": True,
+            "data": {
+                "description": "confirmed",
+                "http_records": [
+                    {
+                        "method": "get",
+                        "url": "https://target.test/admin",
+                        "request": {"headers": {}, "body": None},
+                        "response": {"status": 200, "headers": {}, "body": "ok"},
+                        "significance": "Admin endpoint accessible",
+                    }
+                ],
+            },
+        }
+    )
+
+    assert payload == {"accepted": True, "data": {"description": "confirmed"}}
+    assert records[0]["method"] == "GET"
 

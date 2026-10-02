@@ -105,6 +105,51 @@ class InProcessClient:
             {"from": from_ids, "description": description, "creator": creator, "worker": None},
         )
 
+    def create_runtime_event(
+        self,
+        project_id: str,
+        *,
+        event_type: str,
+        status: str,
+        message: str,
+        phase: str | None = None,
+        worker: str | None = None,
+        intent_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> ApiResult:
+        return self._post(
+            f"/projects/{project_id}/events",
+            {
+                "event_type": event_type,
+                "phase": phase,
+                "status": status,
+                "message": message,
+                "worker": worker,
+                "intent_id": intent_id,
+                "payload": payload,
+            },
+        )
+
+    def create_http_record(self, project_id: str, record: dict[str, Any]) -> ApiResult:
+        return self._post(f"/projects/{project_id}/http-records", record)
+
+    def record_failure(
+        self,
+        project_id: str,
+        intent_id: str,
+        worker: str,
+        stale_retry_threshold: int = 3,
+        dead_retry_threshold: int = 10,
+    ) -> ApiResult:
+        return self._post(
+            f"/projects/{project_id}/intents/{intent_id}/fail",
+            {
+                "worker": worker,
+                "stale_retry_threshold": stale_retry_threshold,
+                "dead_retry_threshold": dead_retry_threshold,
+            },
+        )
+
     def _post(self, path: str, payload: dict[str, Any]) -> ApiResult:
         response = self.http.post(path, json=payload)
         data = response.json() if response.headers.get("content-type", "").startswith("application/json") else None
