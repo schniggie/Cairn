@@ -44,10 +44,9 @@ class ClaudeCodeDriver(SeedSessionDriver):
                 session,
                 "--dangerously-skip-permissions",
                 "-p",
-                "--",
-                prompt,
             ],
             session=session,
+            stdin=prompt,
         )
 
     def build_conclude(self, worker: WorkerConfig, prompt: str, session: str) -> DriverResult:
@@ -58,8 +57,7 @@ class ClaudeCodeDriver(SeedSessionDriver):
                 session,
                 "--dangerously-skip-permissions",
                 "-p",
-                "--",
-                prompt,
             ],
             session=session,
+            stdin=prompt,
         )

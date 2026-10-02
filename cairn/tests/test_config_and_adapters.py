@@ -250,9 +250,10 @@ def test_codex_driver_execute_argv_passes_model_endpoint_and_prompt() -> None:
         }
     )
 
-    argv = CodexDriver().build_execute(worker, "prompt", None).argv
+    result = CodexDriver().build_execute(worker, "prompt", None)
 
-    assert "--model" in argv
-    assert "gpt-test" in argv
-    assert 'model_providers.cairn.base_url="http://api/v1"' in argv
-    assert argv[-2:] == ["--", "prompt"]
+    assert "--model" in result.argv
+    assert "gpt-test" in result.argv
+    assert 'model_providers.cairn.base_url="http://api/v1"' in result.argv
+    assert result.argv[-2:] == ["--", "-"]
+    assert result.stdin == "prompt"

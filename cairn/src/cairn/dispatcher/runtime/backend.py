@@ -26,6 +26,7 @@ class ExecutionBackend(Protocol):
         command: list[str],
         timeout_seconds: int | None = None,
         kill_after_seconds: int = 5,
+        stdin: str | None = None,
     ) -> ExecProcess: ...
 
     def write_text_file(self, container_name: str, path: str, content: str) -> None: ...

@@ -40,9 +40,11 @@ class LocalProcess:
         env: dict[str, str],
         timeout_seconds: int | None = None,
         term_grace_seconds: int = 5,
+        stdin: str | None = None,
     ):
         self.command = command
         self.env = env
+        self.stdin = stdin
         self._cwd = cwd
         self._timeout_seconds = timeout_seconds
         self._term_grace = max(1.0, float(term_grace_seconds))
@@ -61,6 +63,7 @@ class LocalProcess:
             self.command,
             cwd=self._cwd,
             env=self.env,
+            stdin=subprocess.PIPE if self.stdin is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -68,6 +71,9 @@ class LocalProcess:
             errors="replace",
             start_new_session=True,
         )
+        if self.stdin is not None and self._process.stdin is not None:
+            self._process.stdin.write(self.stdin)
+            self._process.stdin.close()
         self._stdout_thread = threading.Thread(
             target=self._drain, args=(self._process.stdout, self._stdout, self._important_stdout), daemon=True
         )

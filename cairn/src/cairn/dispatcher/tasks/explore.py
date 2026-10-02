@@ -132,6 +132,7 @@ def run_explore_task(
             ),
             lease=lease,
             cancellation=cancellation,
+            stdin=execute.stdin,
         )
         backfill_safety_fallbacks(client, first.stderr, config.safety)
         safety_decision = latest_blocked_action(client, project.project.id, run_id)
@@ -392,6 +393,7 @@ def _try_conclude_fallback(
         ),
         lease=lease,
         cancellation=cancellation,
+        stdin=conclude_command.stdin,
     )
     backfill_safety_fallbacks(client, result.stderr, config.safety)
     safety_decision = latest_blocked_action(client, project_id, run_id) or safety_decision
@@ -521,6 +523,7 @@ def _run_process(
     safety_context: SafetyRunContext,
     lease: HeartbeatLease,
     cancellation: TaskCancellation,
+    stdin: str | None = None,
 ):
     return run_worker_process(
         container_manager,
@@ -533,4 +536,5 @@ def _run_process(
         safety_context=safety_context,
         lease=lease,
         cancellation=cancellation,
+        stdin=stdin,
     )

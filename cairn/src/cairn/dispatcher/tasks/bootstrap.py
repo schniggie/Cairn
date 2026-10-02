@@ -125,6 +125,7 @@ def run_bootstrap_task(
             ),
             lease=lease,
             cancellation=cancellation,
+            stdin=execute.stdin,
         )
         backfill_safety_fallbacks(client, first.stderr, config.safety)
         safety_decision = latest_blocked_action(client, project.project.id, run_id)
@@ -389,6 +390,7 @@ def _try_conclude_fallback(
         ),
         lease=lease,
         cancellation=cancellation,
+        stdin=conclude_command.stdin,
     )
     backfill_safety_fallbacks(client, result.stderr, config.safety)
     safety_decision = latest_blocked_action(client, project.project.id, run_id) or safety_decision

@@ -42,8 +42,9 @@ class CodexDriver(RegexSessionDriver):
                     "exec",
                     "--dangerously-bypass-approvals-and-sandbox",
                     "--",
-                    prompt,
-                ]
+                    "-",
+                ],
+                stdin=prompt,
             )
         env = worker.env
         return DriverResult(
@@ -66,24 +67,29 @@ class CodexDriver(RegexSessionDriver):
                 "-c",
                 'model_providers.cairn.env_key="OPENAI_API_KEY"',
                 "--",
-                prompt,
-            ]
+                "-",
+            ],
+            stdin=prompt,
         )
 
     def build_conclude(self, worker: WorkerConfig, prompt: str, session: str) -> DriverResult:
         if self.local:
-            argv = [
-                "codex",
-                "exec",
-                "resume",
-                session,
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--",
-                prompt,
-            ]
-        else:
-            env = worker.env
-            argv = [
+            return DriverResult(
+                argv=[
+                    "codex",
+                    "exec",
+                    "resume",
+                    session,
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "--",
+                    "-",
+                ],
+                session=session,
+                stdin=prompt,
+            )
+        env = worker.env
+        return DriverResult(
+            argv=[
                 "codex",
                 "exec",
                 "resume",
@@ -104,6 +110,30 @@ class CodexDriver(RegexSessionDriver):
                 "-c",
                 'model_providers.cairn.env_key="OPENAI_API_KEY"',
                 "--",
-                prompt,
-            ]
-        return DriverResult(argv=argv, session=session)
+                "-",
+            ],
+            session=session,
+            stdin=prompt,
+        )
+
+    @staticmethod
+    def _healthcheck_url(worker: WorkerConfig) -> str:
+        return f"{worker.env['CODEX_BASE_URL']}/responses"
+
+    @staticmethod
+    def _healthcheck_headers(worker: WorkerConfig) -> list[str]:
+        return [
+            "-H",
+            f"Authorization: Bearer {worker.env['OPENAI_API_KEY']}",
+            "-H",
+            "content-type: application/json",
+        ]
+
+    @staticmethod
+    def _healthcheck_payload(worker: WorkerConfig) -> str:
+        return (
+            '{"input":[{"content":"ping","role":"user"}],'
+            '"model":"'
+            + worker.env["CODEX_MODEL"]
+            + '","stream":false}'
+        )

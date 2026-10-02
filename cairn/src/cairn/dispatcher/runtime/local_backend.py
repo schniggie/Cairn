@@ -45,6 +45,7 @@ class LocalBackend:
         command: list[str],
         timeout_seconds: int | None = None,
         kill_after_seconds: int = 5,
+        stdin: str | None = None,
     ) -> LocalProcess:
         merged_env = {**os.environ, **(env or {})}
         return LocalProcess(
@@ -53,6 +54,7 @@ class LocalBackend:
             env=merged_env,
             timeout_seconds=timeout_seconds,
             term_grace_seconds=kill_after_seconds,
+            stdin=stdin,
         )
 
     def write_text_file(self, container_name: str, path: str, content: str) -> None:

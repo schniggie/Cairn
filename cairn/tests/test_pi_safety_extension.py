@@ -77,6 +77,7 @@ class _RecordingBackend:
         command: list[str],
         timeout_seconds: int | None = None,
         kill_after_seconds: int = 5,
+        stdin: str | None = None,
     ) -> _FinishedProcess:
         self.operations.append(("exec", container_name, tuple(command)))
         self.env = env

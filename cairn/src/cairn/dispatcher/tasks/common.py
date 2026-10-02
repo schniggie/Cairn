@@ -191,6 +191,7 @@ def run_worker_process(
     safety_context: SafetyRunContext | None = None,
     lease: HeartbeatLease | None = None,
     cancellation: TaskCancellation | None = None,
+    stdin: str | None = None,
 ) -> ProcessResult:
     LOG.info(
         "starting container exec container=%s worker=%s phase=%s timeout=%ss",
@@ -199,6 +200,8 @@ def run_worker_process(
         phase,
         timeout_seconds,
     )
+    if stdin is None:
+        stdin = command.stdin
     for asset in command.assets:
         container_manager.write_text_file(container_name, asset.path, asset.content)
 
@@ -240,6 +243,7 @@ def run_worker_process(
         exec_env,
         command.argv,
         timeout_seconds=timeout_seconds,
+        stdin=stdin,
     )
     process.start()
     if lease is not None:

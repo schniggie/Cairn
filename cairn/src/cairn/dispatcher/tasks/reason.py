@@ -143,6 +143,7 @@ def run_reason_task(
             ),
             lease=lease,
             cancellation=cancellation,
+            stdin=command.stdin,
         )
         backfill_safety_fallbacks(client, result.stderr, config.safety)
         safety_decision = latest_blocked_action(client, project.project.id, run_id)

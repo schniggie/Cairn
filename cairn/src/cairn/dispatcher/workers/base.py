@@ -20,6 +20,7 @@ class DriverResult:
     argv: list[str]
     session: str | None = None
     assets: tuple[RuntimeAsset, ...] = ()
+    stdin: str | None = None
 
 
 class WorkerDriver(abc.ABC):
