@@ -57,3 +57,8 @@ This may be a Capture-The-Flag challenge. Summarize only facts that are actually
 ```
 {safety_decision_context}
 ```
+
+# Installed context
+{skills}
+
+{project_knowledge}

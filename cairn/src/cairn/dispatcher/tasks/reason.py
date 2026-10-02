@@ -17,6 +17,7 @@ from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
 from cairn.dispatcher.tasks.common import (
+    knowledge_prompt,
     backfill_safety_fallbacks,
     best_effort_release_reason,
     cancel_reason,
@@ -29,7 +30,7 @@ from cairn.dispatcher.tasks.common import (
     task_healthcheck_enabled,
     write_graph_snapshot_reference,
 )
-from cairn.dispatcher.workers.registry import get_driver
+from cairn.dispatcher.workers.registry import execution_mode_for, get_driver
 from cairn.server.models import ProjectDetail
 
 LOG = logging.getLogger(__name__)
@@ -44,7 +45,7 @@ def run_reason_task(
     worker: WorkerConfig,
     cancellation: TaskCancellation,
 ) -> str:
-    driver = get_driver(worker.type, config.runtime.execution)
+    driver = get_driver(worker.type, execution_mode_for(container_manager, config.runtime.execution))
     run_id = uuid.uuid4().hex
     task_started = time.perf_counter()
     healthcheck_timeout = config.runtime.healthcheck_timeout
@@ -56,7 +57,9 @@ def run_reason_task(
     container_name = ""
     session: str | None = None
     try:
-        container_name = container_manager.ensure_running(project.project.id)
+        container_name = container_manager.ensure_running(
+            project.project.id, project_root=project.project.project_root
+        )
 
         if task_healthcheck_enabled(config):
             LOG.info(
@@ -123,6 +126,7 @@ def run_reason_task(
                 "fact_ids": format_fact_ids(allowed_fact_ids),
                 "open_intents": format_open_intents(open_intents),
                 "max_intents": str(config.tasks.reason.max_intents),
+                **knowledge_prompt(container_manager, container_name, project.project.project_root),
             },
         )
 

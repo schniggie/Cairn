@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS projects (
     project_kind TEXT NOT NULL DEFAULT 'general',
     created_at TEXT NOT NULL,
     difficulty TEXT,
+    backend TEXT,
+    project_root TEXT,
     started_at TEXT,
     reason_worker TEXT,
     reason_trigger TEXT,
@@ -247,6 +249,10 @@ def _ensure_project_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE projects ADD COLUMN difficulty TEXT")
     if "project_kind" not in columns:
         conn.execute("ALTER TABLE projects ADD COLUMN project_kind TEXT NOT NULL DEFAULT 'general'")
+    if "backend" not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN backend TEXT")
+    if "project_root" not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN project_root TEXT")
 
 
 def _ensure_intent_columns(conn: sqlite3.Connection) -> None:

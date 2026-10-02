@@ -13,6 +13,7 @@ from cairn.server.routers import (
     audit,
     ctf,
     dispatch_config,
+    engines,
     events,
     export,
     hints,
@@ -25,6 +26,7 @@ from cairn.server.routers import (
     research_source_compare,
     research_sources,
     settings,
+    skills,
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -48,9 +50,12 @@ _WORKER_WRITE_SUFFIXES = (
 
 class AdminTokenMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        if ADMIN_TOKEN and request.url.path.startswith("/projects"):
-            path = request.url.path
-            if request.method == "POST" and any(path.endswith(suffix) for suffix in _WORKER_WRITE_SUFFIXES):
+        path = request.url.path
+        protected = path.startswith("/projects") or path.startswith("/skills") or path.startswith("/engines")
+        if ADMIN_TOKEN and protected:
+            if request.method == "POST" and path.startswith("/projects") and any(
+                path.endswith(suffix) for suffix in _WORKER_WRITE_SUFFIXES
+            ):
                 return await call_next(request)
             token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
             if token != ADMIN_TOKEN:
@@ -76,6 +81,8 @@ if ADMIN_TOKEN:
 
 app.include_router(settings.router)
 app.include_router(projects.router)
+app.include_router(skills.router)
+app.include_router(engines.router)
 app.include_router(hints.router)
 app.include_router(intents.router)
 app.include_router(export.router)

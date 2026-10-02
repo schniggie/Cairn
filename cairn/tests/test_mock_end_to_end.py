@@ -214,7 +214,7 @@ class LocalContainerManager:
     def container_name(self, project_id: str) -> str:
         return f"local-{project_id}"
 
-    def ensure_running(self, project_id: str) -> str:
+    def ensure_running(self, project_id: str, *, project_root: str | None = None) -> str:
         return self.container_name(project_id)
 
     def build_exec_process(

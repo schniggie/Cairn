@@ -46,6 +46,8 @@ class DispatcherLoop:
         self.config_path = config_path
         self.config = DispatchConfig.load(config_path)
         self.client = CairnClient(self.config.server)
+        self._override_local: LocalBackend | None = None
+        self._override_container: ContainerManager | None = None
         if self.config.runtime.execution == "local":
             self.container_manager = LocalBackend(self.config.local or LocalConfig())
         else:
@@ -77,7 +79,38 @@ class DispatcherLoop:
         self.executor.shutdown(wait=True)
         self.cleanup_executor.shutdown(wait=True)
         self.container_manager.close()
+        override_local = getattr(self, "_override_local", None)
+        override_container = getattr(self, "_override_container", None)
+        if override_local is not None:
+            override_local.close()
+        if override_container is not None:
+            override_container.close()
         self.client.close()
+
+    def execution_backend(self, backend: str | None):
+        """Per-project docker/local override. Unset follows the dispatcher execution mode."""
+        if backend in (None, ""):
+            requested = self.config.runtime.execution
+        elif backend == "docker":
+            requested = "container"
+        else:
+            requested = backend
+        if requested == self.config.runtime.execution:
+            return self.container_manager
+        if requested == "local":
+            override = getattr(self, "_override_local", None)
+            if override is None:
+                override = LocalBackend(self.config.local or LocalConfig())
+                self._override_local = override
+            return override
+        if self.config.container is None:
+            LOG.warning("project requested docker but container config is missing; using dispatcher backend")
+            return self.container_manager
+        override = getattr(self, "_override_container", None)
+        if override is None:
+            override = ContainerManager(self.config.container)
+            self._override_container = override
+        return override
 
     def run(self, once: bool = False) -> None:
         try:
@@ -300,7 +333,7 @@ class DispatcherLoop:
 
     def _try_dispatch_project(self, summary: ProjectSummary) -> bool:
         skip_scope = f"project:{summary.id}:skip"
-        container_name = self.container_manager.container_name(summary.id)
+        container_name = self.execution_backend(summary.backend).container_name(summary.id)
         if container_name in self._cleanup_pending:
             self._log_changed(
                 f"{skip_scope}:cleanup_pending",
@@ -463,7 +496,7 @@ class DispatcherLoop:
                 run_reason_task,
                 self.config,
                 self.client,
-                self.container_manager,
+                self.execution_backend(project.project.backend),
                 project,
                 export_yaml,
                 worker,
@@ -531,7 +564,7 @@ class DispatcherLoop:
                 run_bootstrap_task,
                 self.config,
                 self.client,
-                self.container_manager,
+                self.execution_backend(project.project.backend),
                 project,
                 intent,
                 worker,
@@ -590,7 +623,7 @@ class DispatcherLoop:
                 run_explore_task,
                 self.config,
                 self.client,
-                self.container_manager,
+                self.execution_backend(project.project.backend),
                 project,
                 export_yaml,
                 intent,
@@ -902,13 +935,14 @@ class DispatcherLoop:
                 continue
             if self._inactive_cleanup_done.get(summary.id) == summary.status:
                 continue
-            container_name = self.container_manager.container_name(summary.id)
+            backend = self.execution_backend(summary.backend)
+            container_name = backend.container_name(summary.id)
             if container_name in self._cleanup_pending:
                 continue
-            if not self.container_manager.needs_completed_cleanup(summary.id):
+            if not backend.needs_completed_cleanup(summary.id):
                 self._inactive_cleanup_done[summary.id] = summary.status
                 continue
-            future = self.cleanup_executor.submit(self.container_manager.cleanup_completed, summary.id)
+            future = self.cleanup_executor.submit(backend.cleanup_completed, summary.id)
             self.cleanup_futures[future] = (container_name, summary.id, summary.status)
             self._cleanup_pending.add(container_name)
 
@@ -918,13 +952,14 @@ class DispatcherLoop:
                 continue
             if self._inactive_cleanup_done.get(summary.id) == summary.status:
                 continue
-            container_name = self.container_manager.container_name(summary.id)
+            backend = self.execution_backend(summary.backend)
+            container_name = backend.container_name(summary.id)
             if container_name in self._cleanup_pending:
                 continue
-            if not self.container_manager.needs_stopped_cleanup(summary.id):
+            if not backend.needs_stopped_cleanup(summary.id):
                 self._inactive_cleanup_done[summary.id] = summary.status
                 continue
-            future = self.cleanup_executor.submit(self.container_manager.cleanup_stopped, summary.id)
+            future = self.cleanup_executor.submit(backend.cleanup_stopped, summary.id)
             self.cleanup_futures[future] = (container_name, summary.id, summary.status)
             self._cleanup_pending.add(container_name)
 

@@ -32,11 +32,29 @@ class LocalBackend:
     def container_name(self, project_id: str) -> str:
         return str(self._project_dir(project_id))
 
-    def ensure_running(self, project_id: str) -> str:
+    def ensure_running(self, project_id: str, *, project_root: str | None = None) -> str:
         project_dir = self._project_dir(project_id)
         project_dir.mkdir(parents=True, exist_ok=True)
+        self._link_project_root(project_dir, project_root)
         LOG.debug("local project workdir ready project=%s dir=%s", project_id, project_dir)
         return str(project_dir)
+
+    @staticmethod
+    def _link_project_root(project_dir: Path, project_root: str | None) -> None:
+        if not project_root:
+            return
+        target = Path(project_root).expanduser().resolve()
+        if not target.is_dir():
+            LOG.warning("project_root is not a directory: %s", target)
+            return
+        link = project_dir / "project"
+        if link.is_symlink() and link.resolve() == target:
+            return
+        if link.is_symlink() or link.is_file():
+            link.unlink()
+        elif link.exists():
+            return
+        link.symlink_to(target, target_is_directory=True)
 
     def build_exec_process(
         self,

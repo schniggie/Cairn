@@ -8,6 +8,9 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from cairn import skills_store
+from cairn.dispatcher.prompting import format_project_knowledge, format_skills
+
 from cairn.dispatcher.config import DispatchConfig, SafetyConfig, WorkerConfig, resolve_safety_token
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
@@ -157,6 +160,48 @@ def cancel_reason(result: ProcessResult, cancellation: TaskCancellation | None =
 
 def communicate_timeout(timeout_seconds: int, grace_seconds: int = PROCESS_COMMUNICATE_GRACE_SECONDS) -> int:
     return timeout_seconds + grace_seconds
+
+
+def knowledge_prompt(container_manager: object, container_name: str, project_root: str | None) -> dict[str, str]:
+    return {
+        "skills": prepare_skills(container_manager, container_name),
+        "project_knowledge": prepare_project_knowledge(project_root),
+    }
+
+
+def prepare_skills(runtime: object, workspace_key: str) -> str:
+    """Copy enabled skills into the worker workspace and return prompt text."""
+    metas = [meta for meta in skills_store.list_skills() if meta.enabled]
+    if not metas:
+        return ""
+    for skill_dir in skills_store.enabled_skill_dirs():
+        for path in skill_dir.rglob("*"):
+            if not path.is_file() or path.stat().st_size > 1_000_000:
+                continue
+            relative = path.relative_to(skill_dir).as_posix()
+            dest = _skill_dest(workspace_key, skill_dir.name, relative)
+            try:
+                runtime.write_text_file(workspace_key, dest, path.read_text(encoding="utf-8"))  # type: ignore[attr-defined]
+            except UnicodeDecodeError:
+                if hasattr(runtime, "write_binary_file"):
+                    runtime.write_binary_file(workspace_key, dest, path.read_bytes())  # type: ignore[attr-defined]
+            except Exception:
+                LOG.debug("failed to install skill file %s", path, exc_info=True)
+    return format_skills(metas)
+
+
+def prepare_project_knowledge(project_root: str | None) -> str:
+    if not project_root:
+        return ""
+    root = Path(project_root).expanduser()
+    present = [name for name in ("src-repo", "docs-out", "graphify-out", "scan-out", "codegraph-out") if (root / name).is_dir()]
+    return format_project_knowledge(str(root), present)
+
+
+def _skill_dest(workspace_key: str, name: str, relative: str) -> str:
+    if workspace_key.startswith("/"):
+        return str(Path(workspace_key) / ".claude" / "skills" / name / relative)
+    return f"/workspace/.claude/skills/{name}/{relative}"
 
 
 def task_healthcheck_enabled(config: DispatchConfig) -> bool:

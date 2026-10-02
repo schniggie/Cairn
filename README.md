@@ -108,7 +108,7 @@ System architecture:
 
 Workers can also run directly on the dispatcher host instead of in per-project containers — **local mode**, no Docker required. See [Local mode](#local-mode-no-docker) below.
 
-Supported worker backends: **Claude Code**, **Codex**, **Pi**, and **Gemini CLI**. Pi can optionally load a packaged safety extension; see [Pi safety boundary](#pi-safety-boundary). Gemini uses host CLI authentication and does not resume a conclude session.
+Supported worker backends: **Claude Code**, **Codex**, **Pi**, **Gemini CLI**, and **OpenCode**. Pi can optionally load a packaged safety extension; see [Pi safety boundary](#pi-safety-boundary). Gemini and OpenCode can use host CLI authentication. OpenCode container mode expects `OPENCODE_MODEL`, `OPENCODE_BASE_URL`, and `OPENCODE_API_KEY`.
 
 ## Results
 

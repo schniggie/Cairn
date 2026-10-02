@@ -42,3 +42,8 @@ Normal return example:
 ```
 {intent_description}
 ```
+
+# Installed context
+{skills}
+
+{project_knowledge}

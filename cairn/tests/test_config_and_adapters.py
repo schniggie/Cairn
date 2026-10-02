@@ -14,7 +14,7 @@ from cairn.dispatcher.workers.registry import DRIVERS, LOCAL_DRIVERS
 from conftest import make_config
 
 
-@pytest.mark.parametrize("worker_type", ["claudecode", "codex", "gemini", "pi", "mock"])
+@pytest.mark.parametrize("worker_type", ["claudecode", "codex", "gemini", "opencode", "pi", "mock"])
 def test_local_config_accepts_every_worker_type(worker_type: str) -> None:
     payload = make_config().model_dump()
     payload["runtime"]["execution"] = "local"
@@ -28,8 +28,8 @@ def test_local_config_accepts_every_worker_type(worker_type: str) -> None:
 
 
 def test_production_registry_keeps_all_worker_backends() -> None:
-    assert set(DRIVERS) == {"claudecode", "codex", "gemini", "pi", "mock"}
-    assert set(LOCAL_DRIVERS) == {"claudecode", "codex", "gemini", "pi", "mock"}
+    assert set(DRIVERS) == {"claudecode", "codex", "gemini", "opencode", "pi", "mock"}
+    assert set(LOCAL_DRIVERS) == {"claudecode", "codex", "gemini", "opencode", "pi", "mock"}
 
 
 def test_container_config_allows_missing_safety_block() -> None:

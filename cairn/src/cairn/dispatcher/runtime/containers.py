@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import logging
 import os
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import tarfile
 import threading
 
@@ -33,12 +33,12 @@ class ContainerManager:
         sanitized = project_id.replace("/", "-")
         return f"{self._PREFIX}{sanitized}"
 
-    def ensure_running(self, project_id: str) -> str:
+    def ensure_running(self, project_id: str, *, project_root: str | None = None) -> str:
         name = self.container_name(project_id)
         with self._ensure_running_lock(name):
-            return self._ensure_running_locked(project_id, name)
+            return self._ensure_running_locked(project_id, name, project_root)
 
-    def _ensure_running_locked(self, project_id: str, name: str) -> str:
+    def _ensure_running_locked(self, project_id: str, name: str, project_root: str | None = None) -> str:
         state = self.inspect_state(name)
         if state == "running":
             LOG.debug("container already running project=%s container=%s", project_id, name)
@@ -48,6 +48,13 @@ class ContainerManager:
             self._start_existing(name)
             return name
         LOG.info("creating container project=%s container=%s image=%s", project_id, name, self._config.image)
+        volumes = None
+        if project_root:
+            root = Path(project_root).expanduser().resolve()
+            if root.is_dir():
+                volumes = {str(root): {"bind": "/workspace/project", "mode": "ro"}}
+            else:
+                LOG.warning("project_root is not a directory: %s", root)
         try:
             self._client.containers.run(
                 self._config.image,
@@ -56,6 +63,7 @@ class ContainerManager:
                 name=name,
                 network_mode=self._config.network_mode,
                 cap_add=self._config.cap_add or None,
+                volumes=volumes,
             )
             LOG.info("created container project=%s container=%s", project_id, name)
             return name

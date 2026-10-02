@@ -12,6 +12,7 @@ from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
 from cairn.dispatcher.tasks.common import (
+    knowledge_prompt,
     backfill_safety_fallbacks,
     best_effort_release,
     cancel_reason,
@@ -29,7 +30,7 @@ from cairn.dispatcher.tasks.common import (
 )
 from cairn.safety.r1 import is_r1_fact, synthesize_r1_fact
 from cairn.safety.v1 import is_v1_fact, render_safety_decision_context, synthesize_v1_fact
-from cairn.dispatcher.workers.registry import get_driver
+from cairn.dispatcher.workers.registry import execution_mode_for, get_driver
 from cairn.dispatcher.workers.base import DriverResult
 from cairn.server.models import AuditEvent, Intent, ProjectDetail
 
@@ -46,7 +47,7 @@ def run_explore_task(
     worker: WorkerConfig,
     cancellation: TaskCancellation,
 ) -> str:
-    driver = get_driver(worker.type, config.runtime.execution)
+    driver = get_driver(worker.type, execution_mode_for(container_manager, config.runtime.execution))
     run_id = uuid.uuid4().hex
     task_started = time.perf_counter()
     healthcheck_timeout = config.runtime.healthcheck_timeout
@@ -58,7 +59,9 @@ def run_explore_task(
     container_name = ""
     session: str | None = None
     try:
-        container_name = container_manager.ensure_running(project.project.id)
+        container_name = container_manager.ensure_running(
+            project.project.id, project_root=project.project.project_root
+        )
         from cairn.dispatcher.tasks.bootstrap import _inject_init_files
 
         _inject_init_files(container_manager, container_name, project)
@@ -115,6 +118,7 @@ def run_explore_task(
                 ),
                 "intent_id": intent.id,
                 "intent_description": intent.description,
+                **knowledge_prompt(container_manager, container_name, project.project.project_root),
             },
         )
 
@@ -370,7 +374,8 @@ def _try_conclude_fallback(
         best_effort_release(client, project_id, intent.id, worker.name)
         return "failed"
 
-    container_name = container_manager.ensure_running(project_id)
+    project_root = client.get_project(project_id).project.project_root
+    container_name = container_manager.ensure_running(project_id, project_root=project_root)
 
     prompt = render_prompt(
         load_prompt(config.runtime.prompt_group, "explore_conclude.md"),
@@ -384,6 +389,7 @@ def _try_conclude_fallback(
             "intent_id": intent.id,
             "intent_description": intent.description,
             "safety_decision_context": render_safety_decision_context(safety_decision),
+            **knowledge_prompt(container_manager, container_name, project_root),
         },
     )
     conclude_command = driver.build_conclude(worker, prompt, session)

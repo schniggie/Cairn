@@ -132,6 +132,8 @@ class ProjectMeta(BaseModel):
     created_at: str
     started_at: str | None = None
     difficulty: str | None = None
+    backend: Literal["docker", "local"] | None = None
+    project_root: str | None = None
     reason: ProjectReason | None = None
 
 
@@ -193,6 +195,8 @@ class CreateProjectRequest(BaseModel):
     difficulty: str | None = None
     hints: list[CreateHintInline] | None = None
     init_files: list[CreateInitFileInline] | None = None
+    backend: Literal["docker", "local"] | None = None
+    project_root: str | None = None
 
     @field_validator("title", "origin", "goal")
     @classmethod
@@ -559,3 +563,45 @@ class CtfHeartbeatRequest(BaseModel):
 class CtfTestResult(BaseModel):
     ok: bool
     detail: str
+
+
+class EngineOverride(BaseModel):
+    path: str
+    launcher: Literal["direct", "cmd", "powershell"] = "direct"
+
+
+class EngineInfo(BaseModel):
+    type: str
+    binary: str
+    launchable: bool
+    path: str | None = None
+    version: str | None = None
+    source: str | None = None
+    override: EngineOverride | None = None
+
+
+class ToolInfo(BaseModel):
+    name: str
+    launchable: bool
+    version: str | None = None
+    path: str | None = None
+
+
+class SkillInfo(BaseModel):
+    name: str
+    description: str = ""
+    enabled: bool = True
+
+
+class SkillContent(BaseModel):
+    name: str
+    content: str
+
+
+class SkillCreate(BaseModel):
+    name: str
+    content: str
+
+
+class SkillEnable(BaseModel):
+    enabled: bool

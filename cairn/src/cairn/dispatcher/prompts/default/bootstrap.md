@@ -40,3 +40,8 @@ Only return the following after you have confirmed that Goal has been satisfied:
 ```
 {hints}
 ```
+
+# Installed context
+{skills}
+
+{project_knowledge}

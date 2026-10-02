@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 TaskType = Literal["reason", "explore", "bootstrap", "vulnerability_analysis"]
-WorkerType = Literal["claudecode", "codex", "gemini", "pi", "mock"]
+WorkerType = Literal["claudecode", "codex", "gemini", "opencode", "pi", "mock"]
 CompletedAction = Literal["remove", "stop"]
 WorkerHealthcheckMode = Literal["startup_and_task", "startup_only", "disabled"]
 ExecutionMode = Literal["container", "local"]
@@ -46,6 +46,11 @@ WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
         "PI_PROVIDER_API",
     ),
     "gemini": (),
+    "opencode": (
+        "OPENCODE_MODEL",
+        "OPENCODE_BASE_URL",
+        "OPENCODE_API_KEY",
+    ),
     "mock": (),
 }
 

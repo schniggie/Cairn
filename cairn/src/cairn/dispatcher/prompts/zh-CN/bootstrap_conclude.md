@@ -51,3 +51,8 @@ Normal return example:
 ```
 {safety_decision_context}
 ```
+
+# Installed context
+{skills}
+
+{project_knowledge}
