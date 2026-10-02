@@ -77,6 +77,67 @@ def dispatch(config_path: Path, once: bool, startup_healthcheck_only: bool, log_
         raise click.ClickException(str(exc)) from exc
 
 
+@main.command("research-worker")
+@click.option(
+    "--db-path",
+    type=click.Path(path_type=Path),
+    default=db.DEFAULT_DB,
+    show_default=True,
+    help="SQLite database path",
+)
+@click.option(
+    "--workspace-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Root directory for per-session research workspaces",
+)
+@click.option(
+    "--interval",
+    "interval_seconds",
+    type=click.IntRange(min=2, max=3600),
+    default=5,
+    show_default=True,
+    help="Seconds between claim ticks",
+)
+@click.option(
+    "--lease-seconds",
+    "lease_seconds",
+    type=click.IntRange(min=30, max=3600),
+    default=120,
+    show_default=True,
+    help="Research session lease duration",
+)
+@click.option("--log-level", default="INFO", show_default=True, help="Log level")
+@click.option("--once", is_flag=True, help="Run one claim tick and exit")
+@click.option(
+    "--driver",
+    default=None,
+    show_default=False,
+    help="Research agent driver (claudecode|codex|pi|mock); default claudecode, env CAIRN_RESEARCH_DRIVER",
+)
+def research_worker(
+    db_path: Path,
+    workspace_root: Path | None,
+    interval_seconds: int,
+    lease_seconds: int,
+    log_level: str,
+    once: bool,
+    driver: str | None,
+):
+    """Run the bounded autonomous research worker."""
+    configure_logging(log_level)
+    from cairn.server.research_worker import ResearchWorker
+
+    worker = ResearchWorker(
+        db_path=db_path,
+        workspace_root=workspace_root,
+        interval_seconds=interval_seconds,
+        lease_seconds=lease_seconds,
+        driver=driver,
+    )
+    worker.run(once=once)
+
+
 @main.command()
 @click.option(
     "--server",

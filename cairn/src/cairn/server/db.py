@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS projects (
     title TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
     bootstrap_enabled INTEGER NOT NULL DEFAULT 1,
+    project_kind TEXT NOT NULL DEFAULT 'general',
     created_at TEXT NOT NULL,
     difficulty TEXT,
     started_at TEXT,
@@ -210,6 +211,7 @@ def configure(path: Path) -> None:
         _ensure_project_columns(conn)
         _ensure_intent_columns(conn)
         _ensure_ctf_columns(conn)
+        _ensure_research_schema(conn)
 
 
 def _ensure_project_columns(conn: sqlite3.Connection) -> None:
@@ -234,6 +236,8 @@ def _ensure_project_columns(conn: sqlite3.Connection) -> None:
         )
     if "difficulty" not in columns:
         conn.execute("ALTER TABLE projects ADD COLUMN difficulty TEXT")
+    if "project_kind" not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN project_kind TEXT NOT NULL DEFAULT 'general'")
 
 
 def _ensure_intent_columns(conn: sqlite3.Connection) -> None:
@@ -242,6 +246,31 @@ def _ensure_intent_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE intents ADD COLUMN concluded_as TEXT")
     if "retry_count" not in columns:
         conn.execute("ALTER TABLE intents ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
+
+
+def _ensure_research_schema(conn: sqlite3.Connection) -> None:
+    from cairn.server.research_schema import (
+        CHANGE_WATCH_SCHEMA,
+        RESEARCH_EXPERIENCES_SCHEMA,
+        RESEARCH_IDENTITY_SCHEMA,
+        RESEARCH_REPORT_SCHEMA,
+        RESEARCH_RUN_ACCOUNTS_SCHEMA,
+        RESEARCH_SCHEMA,
+        RESEARCH_SOURCE_SCHEMA,
+        RESEARCH_WORKER_RUNTIME_SCHEMA,
+    )
+
+    for script in (
+        RESEARCH_SCHEMA,
+        RESEARCH_EXPERIENCES_SCHEMA,
+        CHANGE_WATCH_SCHEMA,
+        RESEARCH_REPORT_SCHEMA,
+        RESEARCH_RUN_ACCOUNTS_SCHEMA,
+        RESEARCH_WORKER_RUNTIME_SCHEMA,
+        RESEARCH_IDENTITY_SCHEMA,
+        RESEARCH_SOURCE_SCHEMA,
+    ):
+        conn.executescript(script)
 
 
 def _ensure_ctf_columns(conn: sqlite3.Connection) -> None:

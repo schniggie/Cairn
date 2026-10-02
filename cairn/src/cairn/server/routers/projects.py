@@ -55,6 +55,7 @@ def list_projects():
                 (SELECT COUNT(*) FROM intents WHERE project_id = p.id AND concluded_at IS NULL AND worker IS NULL) AS unclaimed_intent_count,
                 (SELECT COUNT(*) FROM hints WHERE project_id = p.id) AS hint_count
             FROM projects p
+            WHERE p.project_kind = 'general'
             ORDER BY p.created_at
         """).fetchall()
         return [

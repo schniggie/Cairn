@@ -3,7 +3,8 @@ from __future__ import annotations
 import abc
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from cairn.dispatcher.config import WorkerConfig
 from cairn.dispatcher.workers.health import HealthResult
@@ -13,6 +14,13 @@ from cairn.dispatcher.workers.health import HealthResult
 class RuntimeAsset:
     path: str
     content: str
+
+
+@dataclass(slots=True)
+class AnalysisResponse:
+    text: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+    model: str | None = None
 
 
 @dataclass(slots=True)
@@ -60,6 +68,10 @@ class WorkerDriver(abc.ABC):
 
     def extract_response_text(self, stdout: str, stderr: str) -> str:
         return stdout
+
+    def extract_analysis_response(self, stdout: str, stderr: str) -> AnalysisResponse:
+        """Extract structured analysis text and bounded, non-secret execution metadata."""
+        return AnalysisResponse(text=self.extract_response_text(stdout, stderr))
 
 
 class SeedSessionDriver(WorkerDriver):

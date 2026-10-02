@@ -7,7 +7,23 @@ from fastapi.staticfiles import StaticFiles
 
 from cairn import __version__
 from cairn.server import db
-from cairn.server.routers import audit, ctf, dispatch_config, events, export, hints, http_records, intents, projects, settings
+from cairn.server.routers import (
+    audit,
+    ctf,
+    dispatch_config,
+    events,
+    export,
+    hints,
+    http_records,
+    intents,
+    projects,
+    research,
+    research_identities,
+    research_runtime_status,
+    research_source_compare,
+    research_sources,
+    settings,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -35,11 +51,22 @@ app.include_router(events.router)
 app.include_router(http_records.router)
 app.include_router(dispatch_config.router)
 app.include_router(ctf.router)
+app.include_router(research.router)
+app.include_router(research_runtime_status.router)
+app.include_router(research_identities.router)
+app.include_router(research_sources.router)
+app.include_router(research_source_compare.router)
 
 
 @app.get("/", include_in_schema=False)
 def index():
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/research", include_in_schema=False)
+@app.get("/research/", include_in_schema=False)
+def research_index():
+    return FileResponse(STATIC_DIR / "research" / "index.html")
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
