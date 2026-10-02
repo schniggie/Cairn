@@ -125,12 +125,17 @@ class FakeLease:
 @dataclass
 class FakeContainerManager:
     writes: list[tuple[str, str, str]] = field(default_factory=list)
+    ensure_calls: list[dict] = field(default_factory=list)
 
-    def ensure_running(self, project_id: str, *, project_root: str | None = None) -> str:
+    def ensure_running(self, project_id: str, **kwargs) -> str:
+        self.ensure_calls.append({"project_id": project_id, **kwargs})
         return f"container-{project_id}"
 
     def write_text_file(self, container_name: str, path: str, content: str) -> None:
         self.writes.append((container_name, path, content))
+
+    def remove_container(self, _name: str, force: bool = False) -> None:
+        return None
 
 
 @dataclass

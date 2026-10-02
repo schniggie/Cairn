@@ -3,9 +3,15 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from cairn.dispatcher.config import ResourceBudgetConfig
+
+FactType = Literal["source", "sink", "dataflow", "constraint", "gadget", "reachability", "verification"]
+ConfidenceLevel = Literal["hypothesized", "static-confirmed", "reachable-confirmed", "poc-confirmed", "refuted"]
+BaseKnowledgeKind = Literal["architecture", "auth", "routing", "trust_boundary", "convention"]
+BaseKnowledgeConfidence = Literal["assumed", "code-confirmed", "live-confirmed"]
+RoutingVia = Literal["direct", "gateway_rewrite", "spa_route"]
 
 
 AuditEventType = Literal[
@@ -92,6 +98,18 @@ class Settings(BaseModel):
 class Fact(BaseModel):
     id: str
     description: str
+    type: FactType | None = None
+    confidence: ConfidenceLevel | None = None
+    locations: list[str] | None = None
+    code_version: str | None = None
+    evidence: str | None = None
+    verifies: str | None = None
+    intent_id: str | None = None
+    batch_id: str | None = None
+    oracle_draft: str | None = None
+    payload_draft: str | None = None
+    effective_confidence: ConfidenceLevel | None = None
+    stale: bool = False
 
 
 class Intent(BaseModel):
@@ -106,6 +124,9 @@ class Intent(BaseModel):
     concluded_at: str | None = None
     concluded_as: Literal["success", "dead", "stale", "blocked"] | None = None
     retry_count: int = 0
+    task_kind: Literal["explore", "verify"] | None = None
+    poc_brief: dict | None = None
+    fire_status: Literal["pending", "approved", "denied", "fired"] | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -158,6 +179,7 @@ class ProjectDetail(BaseModel):
     intents: list[Intent]
     hints: list[Hint]
     init_files: list[InitFile] = []
+    base_knowledge: dict | None = None
 
 
 class CreateInitFileInline(BaseModel):
@@ -225,6 +247,7 @@ class CreateIntentRequest(BaseModel):
     description: str
     creator: str
     worker: str | None = None
+    task_kind: Literal["explore", "verify"] | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -291,15 +314,29 @@ class ReasonClaimRequest(BaseModel):
 
 class ConcludeRequest(BaseModel):
     worker: str
-    description: str
+    description: str | None = None
+    observations: list[Observation] | None = None
+    base_knowledge_patches: list[BaseKnowledgePatchEmit] | None = None
 
-    @field_validator("worker", "description")
+    @field_validator("worker")
     @classmethod
-    def validate_non_empty_text(cls, value: str) -> str:
+    def validate_worker(cls, value: str) -> str:
         text = value.strip()
         if not text:
             raise ValueError("must not be empty")
         return text
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> "ConcludeRequest":
+        if self.description is not None and self.observations is not None:
+            raise ValueError("description and observations cannot coexist")
+        if self.description is not None and not self.description.strip():
+            raise ValueError("description must not be empty")
+        if self.observations is not None and len(self.observations) == 0:
+            raise ValueError("observations must not be empty")
+        if self.description is None and not self.observations:
+            raise ValueError("either description or observations is required")
+        return self
 
 
 class CompleteRequest(BaseModel):
@@ -332,6 +369,7 @@ class CompleteRequest(BaseModel):
 class ConcludeResponse(BaseModel):
     fact: Fact
     intent: Intent
+    facts: list[Fact] = []
 
 
 class UpdateProjectStatusRequest(BaseModel):
@@ -563,6 +601,133 @@ class CtfHeartbeatRequest(BaseModel):
 class CtfTestResult(BaseModel):
     ok: bool
     detail: str
+
+
+class Observation(BaseModel):
+    type: FactType | None = None
+    description: str
+    locations: list[str] | None = None
+    evidence: str | None = None
+    oracle_draft: str | None = None
+    payload_draft: str | None = None
+    verifies: str | None = None
+    confidence: ConfidenceLevel | None = None
+    why_failed: dict | None = None
+
+
+class PoCBriefEntry(BaseModel):
+    endpoint: str
+    precondition: str = "none"
+
+
+class PoCBriefPayloadRecipe(BaseModel):
+    gadget: str | None = None
+    shape: str = ""
+
+
+class PoCBriefSuccessSignature(BaseModel):
+    kind: str = "response_match"
+    check: str = ""
+
+
+class PoCBrief(BaseModel):
+    chain: list[str] = Field(default_factory=list)
+    entry: PoCBriefEntry
+    dataflow: str = ""
+    payload_recipe: PoCBriefPayloadRecipe = Field(default_factory=PoCBriefPayloadRecipe)
+    success_signature: PoCBriefSuccessSignature = Field(default_factory=PoCBriefSuccessSignature)
+    constraints_to_bypass: list[str] = Field(default_factory=list)
+
+
+class BaseKnowledgePatchEmit(BaseModel):
+    entry_id: str
+    statement: str | None = None
+    evidence: list[str] | None = None
+    confidence: BaseKnowledgeConfidence | None = None
+
+
+class BaseKnowledgeEntry(BaseModel):
+    id: str
+    kind: BaseKnowledgeKind
+    statement: str
+    evidence: list[str] = Field(default_factory=list)
+    confidence: BaseKnowledgeConfidence = "assumed"
+    revised_by: str | None = None
+
+
+class RoutingMapEntry(BaseModel):
+    src: str
+    live: str
+    via: RoutingVia = "direct"
+    confidence: BaseKnowledgeConfidence = "assumed"
+
+
+class BaseKnowledgeAudit(BaseModel):
+    entry_id: str
+    revised_by: str | None = None
+    actor: str
+    action: str
+    at: str
+
+
+class BaseKnowledge(BaseModel):
+    version: int = 0
+    entries: list[BaseKnowledgeEntry] = Field(default_factory=list)
+    routing_map: list[RoutingMapEntry] = Field(default_factory=list)
+    audit: list[BaseKnowledgeAudit] = Field(default_factory=list)
+
+
+class PutBaseKnowledgeRequest(BaseModel):
+    entries: list[BaseKnowledgeEntry] = Field(default_factory=list)
+    routing_map: list[RoutingMapEntry] = Field(default_factory=list)
+    expected_version: int | None = None
+    actor: str = "worker"
+
+
+class PatchBaseKnowledgeEntryRequest(BaseModel):
+    statement: str | None = None
+    evidence: list[str] | None = None
+    confidence: BaseKnowledgeConfidence | None = None
+    revised_by: str
+    actor: str = "worker"
+    expected_version: int | None = None
+
+
+class FireApprovalRequest(BaseModel):
+    action: Literal["approve", "deny"]
+    actor: str = "human"
+
+
+class KillVerifyRequest(BaseModel):
+    actor: str = "human"
+    reason: str = "kill-switch"
+
+
+class VerifyControlState(BaseModel):
+    project_id: str
+    kill_requested: bool = False
+    kill_requested_at: str | None = None
+    kill_actor: str | None = None
+    kill_reason: str | None = None
+
+
+class ProxyTrafficEntry(BaseModel):
+    id: str
+    project_id: str
+    intent_id: str | None = None
+    request: str
+    response: str | None = None
+    baseline: str | None = None
+    created_at: str
+    status: Literal["recorded", "approved", "denied", "blocked"] = "recorded"
+
+
+class RecordProxyTrafficRequest(BaseModel):
+    intent_id: str | None = None
+    request: str
+    response: str | None = None
+    baseline: str | None = None
+    status: Literal["recorded", "approved", "denied", "blocked"] = "recorded"
 
 
 class EngineOverride(BaseModel):

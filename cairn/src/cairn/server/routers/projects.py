@@ -26,6 +26,7 @@ from cairn.server.services import (
     clear_project_reason,
     expire_reason_leases,
     expire_workers,
+    fact_from_row,
     get_completion_intent_or_409,
     get_project_or_404,
     intent_to_model,
@@ -174,7 +175,7 @@ def get_project(project_id: str):
 
         return ProjectDetail(
             project=project_meta_from_row(row),
-            facts=[Fact(**dict(f)) for f in facts],
+            facts=[fact_from_row(f, conn, project_id) for f in facts],
             intents=build_intents(conn, project_id),
             hints=[Hint(**dict(h)) for h in hints],
             init_files=[InitFile(**dict(item)) for item in init_file_rows],

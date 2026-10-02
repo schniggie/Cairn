@@ -162,6 +162,57 @@ def communicate_timeout(timeout_seconds: int, grace_seconds: int = PROCESS_COMMU
     return timeout_seconds + grace_seconds
 
 
+def project_origin_description(project) -> str | None:
+    for fact in getattr(project, "facts", []) or []:
+        if getattr(fact, "id", None) == "origin":
+            return fact.description
+    return None
+
+
+def origin_codebase_host_path(origin_description: str | None) -> str | None:
+    if not origin_description:
+        return None
+    try:
+        payload = json.loads(origin_description)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    codebase = payload.get("codebase") or {}
+    path = codebase.get("path") if isinstance(codebase, dict) else None
+    if isinstance(path, str) and path.strip():
+        return path.strip()
+    return None
+
+
+def resolve_codebase_host_path(project, *, require_readable: bool = True) -> tuple[str | None, str | None]:
+    host_path = origin_codebase_host_path(project_origin_description(project))
+    if not host_path:
+        return None, None
+    if not require_readable:
+        return host_path, None
+    path = Path(host_path)
+    if not path.exists():
+        return None, f"codebase path does not exist: {host_path}"
+    if not os.access(path, os.R_OK):
+        return None, f"codebase path is not readable: {host_path}"
+    return str(path), None
+
+
+def ensure_static_container(config: DispatchConfig, container_manager: object, project) -> tuple[str | None, str | None]:
+    host_path, err = resolve_codebase_host_path(project, require_readable=True)
+    if err:
+        LOG.error("static container codebase bind failed project=%s error=%s", project.project.id, err)
+        return None, err
+    name = container_manager.ensure_running(  # type: ignore[attr-defined]
+        project.project.id,
+        profile="static",
+        codebase_host_path=host_path,
+        project_root=getattr(project.project, "project_root", None),
+    )
+    return name, None
+
+
 def knowledge_prompt(container_manager: object, container_name: str, project_root: str | None) -> dict[str, str]:
     return {
         "skills": prepare_skills(container_manager, container_name),
@@ -202,6 +253,47 @@ def _skill_dest(workspace_key: str, name: str, relative: str) -> str:
     if workspace_key.startswith("/"):
         return str(Path(workspace_key) / ".claude" / "skills" / name / relative)
     return f"/workspace/.claude/skills/{name}/{relative}"
+
+
+def write_conclude_result_with_observations(
+    client: CairnClient,
+    project_id: str,
+    intent_id: str,
+    worker_name: str,
+    observations: list[dict],
+    *,
+    source: str,
+    phase_ms: int,
+    total_ms: int | None = None,
+    base_knowledge_patches: list[dict] | None = None,
+) -> str:
+    response = client.conclude_observations(
+        project_id,
+        intent_id,
+        worker_name,
+        observations,
+        base_knowledge_patches=base_knowledge_patches,
+    )
+    if response.ok:
+        LOG.info(
+            "intent concluded project=%s intent=%s worker=%s source=%s phase_ms=%s total_ms=%s observations=%s",
+            project_id,
+            intent_id,
+            worker_name,
+            source,
+            phase_ms,
+            total_ms,
+            len(observations),
+        )
+        return "success"
+    LOG.warning(
+        "conclude observations failed project=%s intent=%s status=%s body=%s",
+        project_id,
+        intent_id,
+        response.status_code,
+        preview(response.text),
+    )
+    return "failed"
 
 
 def task_healthcheck_enabled(config: DispatchConfig) -> bool:

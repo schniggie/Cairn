@@ -38,6 +38,14 @@ CREATE TABLE IF NOT EXISTS facts (
     id TEXT NOT NULL,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     description TEXT NOT NULL,
+    type TEXT,
+    confidence TEXT,
+    locations TEXT,
+    code_version TEXT,
+    evidence TEXT,
+    verifies TEXT,
+    intent_id TEXT,
+    batch_id TEXT,
     PRIMARY KEY (id, project_id)
 );
 
@@ -53,6 +61,9 @@ CREATE TABLE IF NOT EXISTS intents (
     concluded_at TEXT,
     concluded_as TEXT,
     retry_count INTEGER NOT NULL DEFAULT 0,
+    task_kind TEXT,
+    poc_brief TEXT,
+    fire_status TEXT,
     PRIMARY KEY (id, project_id)
 );
 
@@ -208,6 +219,32 @@ CREATE TABLE IF NOT EXISTS ctf_challenges (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS base_knowledge (
+    project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL DEFAULT 0,
+    data TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS verify_controls (
+    project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    kill_requested INTEGER NOT NULL DEFAULT 0,
+    kill_requested_at TEXT,
+    kill_actor TEXT,
+    kill_reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS proxy_traffic (
+    id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    intent_id TEXT,
+    request TEXT NOT NULL,
+    response TEXT,
+    baseline TEXT,
+    status TEXT NOT NULL DEFAULT 'recorded',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (id, project_id)
+);
 """
 
 
@@ -223,6 +260,20 @@ def configure(path: Path) -> None:
         _ensure_intent_columns(conn)
         _ensure_ctf_columns(conn)
         _ensure_research_schema(conn)
+        _ensure_fact_columns(conn)
+        _ensure_base_knowledge_table(conn)
+        _ensure_verify_tables(conn)
+
+
+def _ensure_base_knowledge_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS base_knowledge (
+            project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+            version INTEGER NOT NULL DEFAULT 0,
+            data TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT
+        )"""
+    )
 
 
 def _ensure_project_columns(conn: sqlite3.Connection) -> None:
@@ -261,6 +312,13 @@ def _ensure_intent_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE intents ADD COLUMN concluded_as TEXT")
     if "retry_count" not in columns:
         conn.execute("ALTER TABLE intents ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
+    for col_name, col_type in (
+        ("task_kind", "TEXT"),
+        ("poc_brief", "TEXT"),
+        ("fire_status", "TEXT"),
+    ):
+        if col_name not in columns:
+            conn.execute(f"ALTER TABLE intents ADD COLUMN {col_name} {col_type}")
 
 
 def _ensure_research_schema(conn: sqlite3.Connection) -> None:
@@ -321,6 +379,50 @@ def _ensure_ctf_columns(conn: sqlite3.Connection) -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(ctf_challenges)")}
         if "needs_refresh" not in columns:
             conn.execute("ALTER TABLE ctf_challenges ADD COLUMN needs_refresh INTEGER NOT NULL DEFAULT 0")
+
+
+def _ensure_fact_columns(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(facts)")}
+    new_columns = [
+        ("type", "TEXT"),
+        ("confidence", "TEXT"),
+        ("locations", "TEXT"),
+        ("code_version", "TEXT"),
+        ("evidence", "TEXT"),
+        ("verifies", "TEXT"),
+        ("intent_id", "TEXT"),
+        ("batch_id", "TEXT"),
+        ("oracle_draft", "TEXT"),
+        ("payload_draft", "TEXT"),
+    ]
+    for col_name, col_type in new_columns:
+        if col_name not in columns:
+            conn.execute(f"ALTER TABLE facts ADD COLUMN {col_name} {col_type}")
+
+
+def _ensure_verify_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS verify_controls (
+            project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+            kill_requested INTEGER NOT NULL DEFAULT 0,
+            kill_requested_at TEXT,
+            kill_actor TEXT,
+            kill_reason TEXT
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS proxy_traffic (
+            id TEXT NOT NULL,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            intent_id TEXT,
+            request TEXT NOT NULL,
+            response TEXT,
+            baseline TEXT,
+            status TEXT NOT NULL DEFAULT 'recorded',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (id, project_id)
+        )"""
+    )
 
 
 @contextmanager

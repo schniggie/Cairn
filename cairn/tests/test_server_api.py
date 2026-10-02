@@ -97,7 +97,9 @@ def test_project_workflow_create_conclude_complete_and_reopen(client: TestClient
         json={"worker": "explorer", "description": "new fact"},
     )
     assert response.status_code == 200
-    assert response.json()["fact"] == {"id": "f001", "description": "new fact"}
+    fact = response.json()["fact"]
+    assert fact["id"] == "f001"
+    assert fact["description"] == "new fact"
 
     response = client.post(
         f"/projects/{project_id}/complete",
@@ -114,7 +116,8 @@ def test_project_workflow_create_conclude_complete_and_reopen(client: TestClient
     payload = response.json()
     assert payload["project"]["status"] == "active"
     assert payload["project"]["started_at"] is None
-    assert payload["fact"] == {"id": "f002", "description": "human correction"}
+    assert payload["fact"]["id"] == "f002"
+    assert payload["fact"]["description"] == "human correction"
     assert payload["intent"]["from"] == ["f001"]
     assert payload["intent"]["to"] == "f002"
 

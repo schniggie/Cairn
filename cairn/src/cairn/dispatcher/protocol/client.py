@@ -226,6 +226,51 @@ class CairnClient:
             },
         )
 
+    def get_verify_control(self, project_id: str) -> dict:
+        response = self._session().get(self._url(f"/projects/{project_id}/verify/control"), timeout=self._timeout)
+        response.raise_for_status()
+        return response.json()
+
+    def record_proxy_traffic(
+        self,
+        project_id: str,
+        *,
+        intent_id: str | None,
+        request: str,
+        response: str | None = None,
+        baseline: str | None = None,
+        status: str = "recorded",
+    ) -> ApiResult:
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/verify/proxy_traffic",
+            json={
+                "intent_id": intent_id,
+                "request": request,
+                "response": response,
+                "baseline": baseline,
+                "status": status,
+            },
+        )
+
+    def conclude_observations(
+        self,
+        project_id: str,
+        intent_id: str,
+        worker: str,
+        observations: list[dict],
+        base_knowledge_patches: list[dict] | None = None,
+    ) -> ApiResult:
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/intents/{intent_id}/conclude",
+            json={
+                "worker": worker,
+                "observations": observations,
+                "base_knowledge_patches": base_knowledge_patches or [],
+            },
+        )
+
     def _request_json(
         self,
         method: str,

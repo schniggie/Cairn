@@ -27,6 +27,7 @@ from cairn.server.routers import (
     research_sources,
     settings,
     skills,
+    verify_controls,
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -96,6 +97,7 @@ app.include_router(research_runtime_status.router)
 app.include_router(research_identities.router)
 app.include_router(research_sources.router)
 app.include_router(research_source_compare.router)
+app.include_router(verify_controls.router)
 
 
 @app.get("/", include_in_schema=False)

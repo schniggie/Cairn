@@ -17,7 +17,15 @@ class ExecutionBackend(Protocol):
 
     def container_name(self, project_id: str) -> str: ...
 
-    def ensure_running(self, project_id: str, *, project_root: str | None = None) -> str: ...
+    def ensure_running(
+        self,
+        project_id: str,
+        *,
+        project_root: str | None = None,
+        profile: str | None = None,
+        codebase_host_path: str | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> str: ...
 
     def build_exec_process(
         self,

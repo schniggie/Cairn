@@ -23,6 +23,7 @@ from cairn.dispatcher.workers.registry import get_driver
 from cairn.dispatcher.tasks.bootstrap import run_bootstrap_task
 from cairn.dispatcher.tasks.explore import run_explore_task
 from cairn.dispatcher.tasks.reason import run_reason_task
+from cairn.dispatcher.tasks.verify import run_verify_task
 from cairn.server.models import Intent, ProjectDetail, ProjectSummary
 
 LOG = logging.getLogger(__name__)
@@ -397,6 +398,21 @@ class DispatcherLoop:
             and not self._is_bootstrap_intent(intent)
             and intent.concluded_as == "stale"
         ]
+        verify_ready = [
+            intent
+            for intent in fresh_intents
+            if self._is_verify_intent(intent)
+            and (
+                not self.config.tasks.verify.require_fire_approval
+                or intent.fire_status in ("approved", "fired")
+            )
+        ]
+        fresh_intents = [intent for intent in fresh_intents if not self._is_verify_intent(intent)]
+        stale_intents = [intent for intent in stale_intents if not self._is_verify_intent(intent)]
+        if verify_ready:
+            newest = max(verify_ready, key=lambda item: item.created_at)
+            export_yaml = self.client.export_project(summary.id)
+            return self._dispatch_verify(project, export_yaml, newest)
         unclaimed_intents = fresh_intents or stale_intents
         if running_intent_ids and not unclaimed_intents:
             self._log_changed(
@@ -579,6 +595,41 @@ class DispatcherLoop:
         self._clear_project_log_state(project.project.id)
         LOG.info("dispatched bootstrap project=%s intent=%s worker=%s", project.project.id, intent.id, worker.name)
         self._record_task_event(project.project.id, "bootstrap", worker.name, intent.id, "running", "Bootstrap worker started")
+        return True
+
+    def _is_verify_intent(self, intent: Intent) -> bool:
+        if intent.task_kind == "verify":
+            return True
+        return intent.description.upper().startswith("VERIFY")
+
+    def _dispatch_verify(self, project: ProjectDetail, export_yaml: str, intent: Intent) -> bool:
+        selection = self._select_worker(project.project.id, "verify", project.project.difficulty)
+        worker = selection.worker
+        if worker is None or not worker.has_capabilities(["live_http"]):
+            return False
+        claim = self.client.heartbeat(project.project.id, intent.id, worker.name)
+        if not claim.ok:
+            return False
+        try:
+            future = self.executor.submit(
+                run_verify_task,
+                self.config,
+                self.client,
+                self.execution_backend(project.project.backend),
+                project,
+                export_yaml,
+                intent,
+                worker,
+                cancellation := TaskCancellation(),
+            )
+        except Exception:
+            LOG.exception("failed to submit verify task project=%s intent=%s", project.project.id, intent.id)
+            self._best_effort_release(project.project.id, intent.id, worker.name)
+            return False
+        self.futures[future] = RunningTask(project.project.id, "verify", worker.name, cancellation, intent_id=intent.id)
+        self.runtime_project_ids.add(project.project.id)
+        LOG.info("dispatched verify project=%s intent=%s worker=%s", project.project.id, intent.id, worker.name)
+        self._record_task_event(project.project.id, "verify", worker.name, intent.id, "running", "Verify worker started")
         return True
 
     def _dispatch_explore(self, project: ProjectDetail, export_yaml: str, intent: Intent) -> bool:

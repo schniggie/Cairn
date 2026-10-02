@@ -32,10 +32,20 @@ class LocalBackend:
     def container_name(self, project_id: str) -> str:
         return str(self._project_dir(project_id))
 
-    def ensure_running(self, project_id: str, *, project_root: str | None = None) -> str:
+    def ensure_running(
+        self,
+        project_id: str,
+        *,
+        project_root: str | None = None,
+        profile: str | None = None,
+        codebase_host_path: str | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> str:
         project_dir = self._project_dir(project_id)
         project_dir.mkdir(parents=True, exist_ok=True)
-        self._link_project_root(project_dir, project_root)
+        self._link_project_root(project_dir, project_root or codebase_host_path)
+        if profile or extra_env:
+            LOG.debug("local ensure_running project=%s profile=%s", project_id, profile)
         LOG.debug("local project workdir ready project=%s dir=%s", project_id, project_dir)
         return str(project_dir)
 

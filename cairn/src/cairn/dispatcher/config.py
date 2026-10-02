@@ -11,7 +11,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-TaskType = Literal["reason", "explore", "bootstrap", "vulnerability_analysis"]
+TaskType = Literal["reason", "explore", "bootstrap", "vulnerability_analysis", "verify"]
 WorkerType = Literal["claudecode", "codex", "gemini", "opencode", "pi", "mock"]
 CompletedAction = Literal["remove", "stop"]
 WorkerHealthcheckMode = Literal["startup_and_task", "startup_only", "disabled"]
@@ -60,6 +60,8 @@ DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
     "explore_conclude.md": ("{graph_yaml}", "{intent_id}", "{intent_description}", "{safety_decision_context}"),
     "bootstrap.md": ("{origin}", "{goal}", "{hints}"),
     "bootstrap_conclude.md": ("{origin}", "{goal}", "{hints}", "{safety_decision_context}"),
+    "verify.md": ("{graph_yaml}", "{intent_id}", "{intent_description}", "{poc_brief}"),
+    "verify_conclude.md": ("{graph_yaml}", "{intent_id}", "{intent_description}", "{poc_brief}"),
 }
 
 PROMPT_REQUIRED_TOKENS_BY_GROUP: dict[str, dict[str, tuple[str, ...]]] = {
@@ -161,10 +163,33 @@ class BootstrapTaskConfig(BaseModel):
     conclude_timeout: int = Field(gt=0)
 
 
+class VerifyTaskConfig(BaseModel):
+    timeout: int = Field(default=120, gt=0)
+    conclude_timeout: int = Field(default=30, gt=0)
+    max_rounds: int = Field(default=3, ge=1, le=8)
+    require_fire_approval: bool = True
+    force_harness: bool = True
+    allow_model_instantiate: bool = False
+    proxy_url: str | None = None
+
+
 class TasksConfig(BaseModel):
     bootstrap: BootstrapTaskConfig
     reason: ReasonTaskConfig
     explore: ExploreTaskConfig
+    verify: VerifyTaskConfig = Field(default_factory=VerifyTaskConfig)
+
+
+class ContainerProfileConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    image: str | None = None
+    network_mode: str | None = None
+
+
+class ResolvedContainerProfile(BaseModel):
+    image: str
+    network_mode: str
 
 
 class ContainerConfig(BaseModel):
@@ -172,6 +197,15 @@ class ContainerConfig(BaseModel):
     network_mode: str
     completed_action: CompletedAction
     cap_add: list[str] = Field(default_factory=list)
+    verify: ContainerProfileConfig | None = None
+    codebase_mount_path: str = "/codebase"
+
+    def resolve_profile(self, name: str) -> ResolvedContainerProfile:
+        override = self.verify if name == "verify" else None
+        return ResolvedContainerProfile(
+            image=(override.image if override and override.image else self.image),
+            network_mode=(override.network_mode if override and override.network_mode else self.network_mode),
+        )
 
 
 class LocalConfig(BaseModel):
@@ -238,6 +272,13 @@ class WorkerConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     difficulties: list[str] | None = None
     model: str | None = None
+    capabilities: list[Literal["static_fs", "live_http", "browser"]] | None = None
+
+    def has_capabilities(self, required: list[str]) -> bool:
+        if self.capabilities is None:
+            return True
+        owned = set(self.capabilities)
+        return all(item in owned for item in required)
 
     @field_validator("model")
     @classmethod

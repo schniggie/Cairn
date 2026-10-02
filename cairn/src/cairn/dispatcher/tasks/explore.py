@@ -12,6 +12,7 @@ from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
 from cairn.dispatcher.tasks.common import (
+    ensure_static_container,
     knowledge_prompt,
     backfill_safety_fallbacks,
     best_effort_release,
@@ -59,9 +60,11 @@ def run_explore_task(
     container_name = ""
     session: str | None = None
     try:
-        container_name = container_manager.ensure_running(
-            project.project.id, project_root=project.project.project_root
-        )
+        container_name, codebase_error = ensure_static_container(config, container_manager, project)
+        if codebase_error:
+            best_effort_release(client, project.project.id, intent.id, worker.name)
+            return "failed"
+        assert container_name is not None
         from cairn.dispatcher.tasks.bootstrap import _inject_init_files
 
         _inject_init_files(container_manager, container_name, project)
