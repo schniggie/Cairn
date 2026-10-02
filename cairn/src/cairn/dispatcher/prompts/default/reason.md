@@ -29,6 +29,7 @@ If Goal has not been satisfied and no new intent should currently be proposed, r
 
 ## Rules
 - First determine whether the facts already satisfy Goal. If they do, `data.complete.from` must come from `Valid facts`, and `data.complete.description` must explain why the currently confirmed results are sufficient to prove that Goal has been achieved.
+- **Do not complete unless a real, observed flag is in the facts.** In a CTF, "goal satisfied" means the actual flag text has been directly obtained and recorded in a fact — not that the solution seems close. If a fact claims a flag but no one verified it, treat the goal as NOT satisfied and propose an intent to verify it.
 - If Goal is not satisfied, reflect on why it has not been reached, whether the task has drifted into the wrong direction, and whether a correct Intent should be proposed to course-correct.
 - Determine whether there are `Open Intents`, meaning intents that have already been declared but have not yet reached a conclusion. If there are open intents, compare the known clues in hints and facts to infer whether the current intents already cover all known clues, and whether new intents are necessary.
 - If `Open Intents` is empty, you must propose new intents.
@@ -37,6 +38,8 @@ If Goal has not been satisfied and no new intent should currently be proposed, r
 - Each Intent should be a high-value exploration direction. It does not need to be overly detailed. Focus on the core insight and a clear direction. Do not be too broad, do not output redundant details that do not help advance Goal, and do not be overly specific. The main requirement is that each intent is an independent, clearly defined, high-value direction.
 - An Intent may originate from multiple facts.
 - Different intents should cover different exploration dimensions and avoid duplication or heavy overlap.
+- **Learn from `concluded_as: dead` / `stale` intents.** If a direction was already marked dead or stale in the graph, do not re-propose the same direction; course-correct to a different attack surface instead.
+- For CTF challenges, propose intents along concrete category lines when useful: Web enumeration/exploitation, Pwn binary analysis, Misc/Crypto decoding, Reverse engineering, or verifying a suspected flag.
 - Treat `[V1][BRANCH_CLOSED]` and `[R1][RESOURCE_PAUSED]` Facts as concluded branches. Do not create an Intent whose purpose is to retry, encode, rename, or evade the same blocked final action, or to expand the same resource-heavy batch.
 - Other assets, attack surfaces, low-rate individual credential checks, and non-destructive impact paths remain valid independent directions.
 
@@ -45,6 +48,10 @@ If Goal has not been satisfied and no new intent should currently be proposed, r
 ```
 {graph_yaml}
 ```
+
+### Graph field reference
+- `concluded_as`: `success` means finished, `dead` means this direction is exhausted, `stale` means repeated failures, `blocked` means a safety stop, `null` means still open
+- `retry_count`: how many times this Intent has failed
 
 ### Valid facts
 ```

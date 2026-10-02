@@ -177,6 +177,24 @@ class CairnClient:
             json={"from": from_ids, "description": description, "creator": creator, "worker": None},
         )
 
+    def record_failure(
+        self,
+        project_id: str,
+        intent_id: str,
+        worker: str,
+        stale_retry_threshold: int = 3,
+        dead_retry_threshold: int = 10,
+    ) -> ApiResult:
+        return self._request_json(
+            "POST",
+            f"/projects/{project_id}/intents/{intent_id}/fail",
+            json={
+                "worker": worker,
+                "stale_retry_threshold": stale_retry_threshold,
+                "dead_retry_threshold": dead_retry_threshold,
+            },
+        )
+
     def _request_json(
         self,
         method: str,

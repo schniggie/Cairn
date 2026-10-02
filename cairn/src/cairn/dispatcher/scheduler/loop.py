@@ -288,6 +288,9 @@ class DispatcherLoop:
         if self._is_initial_project(project):
             if project.project.reason is not None:
                 return False
+            if self._has_dead_bootstrap_intent(project):
+                export_yaml = self.client.export_project(summary.id)
+                return self._dispatch_reason(project, export_yaml, "bootstrap_dead")
             if self._project_requires_bootstrap(project):
                 return self._dispatch_initial_project(project)
             export_yaml = self.client.export_project(summary.id)
@@ -298,14 +301,25 @@ class DispatcherLoop:
                 export_yaml = self.client.export_project(summary.id)
                 return self._dispatch_reason(project, export_yaml, reason_trigger)
         running_intent_ids = self._project_running_explore_intents(summary.id)
-        unclaimed_intents = [
+        fresh_intents = [
             intent
             for intent in project.intents
             if intent.to is None
             and intent.worker is None
             and intent.id not in running_intent_ids
             and not self._is_bootstrap_intent(intent)
+            and intent.concluded_as is None
         ]
+        stale_intents = [
+            intent
+            for intent in project.intents
+            if intent.to is None
+            and intent.worker is None
+            and intent.id not in running_intent_ids
+            and not self._is_bootstrap_intent(intent)
+            and intent.concluded_as == "stale"
+        ]
+        unclaimed_intents = fresh_intents or stale_intents
         if running_intent_ids and not unclaimed_intents:
             self._log_changed(
                 f"{skip_scope}:explore_running",
@@ -366,7 +380,7 @@ class DispatcherLoop:
         return self._dispatch_bootstrap(project, intent)
 
     def _dispatch_reason(self, project: ProjectDetail, export_yaml: str, trigger: str) -> bool:
-        selection = self._select_worker(project.project.id, "reason")
+        selection = self._select_worker(project.project.id, "reason", project.project.difficulty)
         worker = selection.worker
         if worker is None:
             self._log_changed(
@@ -430,7 +444,7 @@ class DispatcherLoop:
         return True
 
     def _dispatch_bootstrap(self, project: ProjectDetail, intent: Intent) -> bool:
-        selection = self._select_worker(project.project.id, "bootstrap")
+        selection = self._select_worker(project.project.id, "bootstrap", project.project.difficulty)
         worker = selection.worker
         if worker is None:
             self._log_changed(
@@ -488,7 +502,7 @@ class DispatcherLoop:
         return True
 
     def _dispatch_explore(self, project: ProjectDetail, export_yaml: str, intent: Intent) -> bool:
-        selection = self._select_worker(project.project.id, "explore")
+        selection = self._select_worker(project.project.id, "explore", project.project.difficulty)
         worker = selection.worker
         if worker is None:
             self._log_changed(
@@ -546,7 +560,7 @@ class DispatcherLoop:
         LOG.info("dispatched explore project=%s intent=%s worker=%s", project.project.id, intent.id, worker.name)
         return True
 
-    def _select_worker(self, project_id: str, task_type: str) -> WorkerSelection:
+    def _select_worker(self, project_id: str, task_type: str, difficulty: str | None = None) -> WorkerSelection:
         now = time.time()
         candidates: list[WorkerConfig] = []
         blocked_busy: list[str] = []
@@ -557,6 +571,8 @@ class DispatcherLoop:
         for worker in self.config.workers:
             if task_type not in worker.task_types:
                 blocked_task_type.append(worker.name)
+                continue
+            if worker.difficulties and (difficulty is None or difficulty not in worker.difficulties):
                 continue
             running = running_counts.get(worker.name, 0)
             if running >= worker.max_running:
@@ -644,7 +660,15 @@ class DispatcherLoop:
         return len(self.runtime_project_ids & active_ids)
 
     def _project_open_intent_count(self, project: ProjectDetail) -> int:
-        return sum(1 for intent in project.intents if intent.to is None)
+        return sum(
+            1 for intent in project.intents if intent.to is None and intent.concluded_as is None
+        )
+
+    def _has_dead_bootstrap_intent(self, project: ProjectDetail) -> bool:
+        return any(
+            self._is_bootstrap_intent(intent) and intent.concluded_as == "dead"
+            for intent in project.intents
+        )
 
     def _is_bootstrap_intent(self, intent: Intent) -> bool:
         return (
@@ -764,6 +788,27 @@ class DispatcherLoop:
                     )
                 else:
                     self.worker_rejected_until.pop(rejection_key, None)
+                if (
+                    outcome in ("failed", "rejected")
+                    and task.task_type in ("explore", "bootstrap")
+                    and task.intent_id is not None
+                ):
+                    result = self.client.record_failure(
+                        task.project_id,
+                        task.intent_id,
+                        task.worker_name,
+                        stale_retry_threshold=self.config.runtime.stale_retry_threshold,
+                        dead_retry_threshold=self.config.runtime.dead_retry_threshold,
+                    )
+                    if not result.ok:
+                        LOG.warning(
+                            "intent failure record failed project=%s intent=%s worker=%s status=%s body=%s",
+                            task.project_id,
+                            task.intent_id,
+                            task.worker_name,
+                            result.status_code,
+                            result.text,
+                        )
                 if outcome == "success" and task.task_type == "reason":
                     assert task.fact_count is not None
                     assert task.hint_count is not None

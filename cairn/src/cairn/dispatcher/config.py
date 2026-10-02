@@ -182,6 +182,8 @@ class RuntimeConfig(BaseModel):
     worker_healthcheck: WorkerHealthcheckMode = "startup_only"
     execution: ExecutionMode = "container"
     prompt_group: str = Field(min_length=1)
+    stale_retry_threshold: int = Field(default=3, ge=1)
+    dead_retry_threshold: int = Field(default=10, ge=1)
     project_timeout: int | None = Field(default=None, gt=0)
     server_lease_timeout: int | None = Field(default=None, gt=0)
     heartbeat_failure_grace: int | None = Field(default=None, gt=0)
@@ -228,6 +230,7 @@ class WorkerConfig(BaseModel):
     max_running: int = Field(gt=0)
     priority: int = Field(ge=0)
     env: dict[str, str] = Field(default_factory=dict)
+    difficulties: list[str] | None = None
 
     @field_validator("task_types")
     @classmethod

@@ -257,3 +257,109 @@ def test_project_creation_rejects_invalid_bootstrap_enabled(client: TestClient) 
     )
 
     assert response.status_code == 422
+
+
+def test_record_intent_failure_increments_retry_and_degrades_to_stale_dead(client: TestClient) -> None:
+    project_id = _create_project(client)
+    client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "investigate", "creator": "reasoner", "worker": None},
+    )
+    intent_path = f"/projects/{project_id}/intents/i001"
+    client.post(f"{intent_path}/heartbeat", json={"worker": "explorer"})
+
+    response = client.post(f"{intent_path}/fail", json={"worker": "explorer"})
+    assert response.status_code == 200
+    assert response.json()["retry_count"] == 1
+    assert response.json()["concluded_as"] is None
+
+    for _ in range(2):
+        response = client.post(f"{intent_path}/fail", json={"worker": "explorer"})
+    assert response.json()["retry_count"] == 3
+    assert response.json()["concluded_as"] == "stale"
+
+    for _ in range(7):
+        response = client.post(f"{intent_path}/fail", json={"worker": "explorer"})
+    assert response.json()["retry_count"] == 10
+    assert response.json()["concluded_as"] == "dead"
+
+
+def test_record_intent_failure_does_not_require_worker_ownership(client: TestClient) -> None:
+    project_id = _create_project(client)
+    client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "investigate", "creator": "reasoner", "worker": None},
+    )
+    intent_path = f"/projects/{project_id}/intents/i001"
+    client.post(f"{intent_path}/heartbeat", json={"worker": "worker-a"})
+
+    response = client.post(f"{intent_path}/fail", json={"worker": "worker-b"})
+    assert response.status_code == 200
+    assert response.json()["retry_count"] == 1
+    assert response.json()["worker"] == "worker-a"
+
+
+def test_record_intent_failure_uses_custom_thresholds(client: TestClient) -> None:
+    project_id = _create_project(client)
+    client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "investigate", "creator": "reasoner", "worker": None},
+    )
+    intent_path = f"/projects/{project_id}/intents/i001"
+    client.post(f"{intent_path}/heartbeat", json={"worker": "explorer"})
+
+    body = {"worker": "explorer", "stale_retry_threshold": 2, "dead_retry_threshold": 4}
+    client.post(f"{intent_path}/fail", json=body)
+    response = client.post(f"{intent_path}/fail", json=body)
+    assert response.json()["retry_count"] == 2
+    assert response.json()["concluded_as"] == "stale"
+
+    for _ in range(2):
+        response = client.post(f"{intent_path}/fail", json=body)
+    assert response.json()["retry_count"] == 4
+    assert response.json()["concluded_as"] == "dead"
+
+
+def test_record_intent_failure_rejects_concluded_intent(client: TestClient) -> None:
+    project_id = _create_project(client)
+    client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "investigate", "creator": "reasoner", "worker": None},
+    )
+    intent_path = f"/projects/{project_id}/intents/i001"
+    client.post(f"{intent_path}/heartbeat", json={"worker": "explorer"})
+    client.post(f"{intent_path}/conclude", json={"worker": "explorer", "description": "new fact"})
+
+    response = client.post(f"{intent_path}/fail", json={"worker": "explorer"})
+    assert response.status_code == 409
+
+
+def test_conclude_sets_concluded_as_success(client: TestClient) -> None:
+    project_id = _create_project(client)
+    client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "investigate", "creator": "reasoner", "worker": None},
+    )
+    intent_path = f"/projects/{project_id}/intents/i001"
+    client.post(f"{intent_path}/heartbeat", json={"worker": "explorer"})
+
+    response = client.post(f"{intent_path}/conclude", json={"worker": "explorer", "description": "new fact"})
+    assert response.status_code == 200
+    assert response.json()["intent"]["concluded_as"] == "success"
+
+
+def test_conclude_resets_retry_count(client: TestClient) -> None:
+    project_id = _create_project(client)
+    client.post(
+        f"/projects/{project_id}/intents",
+        json={"from": ["origin"], "description": "investigate", "creator": "reasoner", "worker": None},
+    )
+    intent_path = f"/projects/{project_id}/intents/i001"
+    client.post(f"{intent_path}/heartbeat", json={"worker": "explorer"})
+    client.post(f"{intent_path}/fail", json={"worker": "explorer"})
+    client.post(f"{intent_path}/fail", json={"worker": "explorer"})
+
+    response = client.post(f"{intent_path}/conclude", json={"worker": "explorer", "description": "new fact"})
+    assert response.status_code == 200
+    assert response.json()["intent"]["retry_count"] == 0
+    assert response.json()["intent"]["concluded_as"] == "success"

@@ -410,3 +410,98 @@ def test_validate_server_settings_rejects_lease_shorter_than_heartbeat_grace() -
 
     with pytest.raises(RuntimeError, match="heartbeat failure grace=90s"):
         loop._validate_server_settings()
+
+
+def test_try_dispatch_prefers_fresh_over_stale_intent() -> None:
+    loop = _loop()
+    loop.config = make_config()
+    loop.futures = {}
+    fresh = make_intent("fresh")
+    fresh.worker = None
+    stale = make_intent("stale")
+    stale.worker = None
+    stale.concluded_as = "stale"
+    project = make_project(intents=[fresh, stale])
+    loop.reason_checkpoints["proj_001"] = ReasonCheckpoint(fact_count=3, hint_count=1, open_intent_count=1)
+    loop.container_manager = type("Containers", (), {"container_name": lambda _self, project_id: project_id})()
+    loop.client = type(
+        "Client",
+        (),
+        {
+            "get_project": lambda _self, _project_id: project,
+            "export_project": lambda _self, _project_id: "graph",
+        },
+    )()
+    dispatched: list[str] = []
+    loop._dispatch_explore = lambda _project, _graph, intent: dispatched.append(intent.id) or True
+
+    assert loop._try_dispatch_project(_summary("proj_001", "active"))
+    assert dispatched == ["fresh"]
+
+
+def test_try_dispatch_falls_back_to_stale_when_no_fresh_intent() -> None:
+    loop = _loop()
+    loop.config = make_config()
+    loop.futures = {}
+    stale = make_intent("stale")
+    stale.worker = None
+    stale.concluded_as = "stale"
+    project = make_project(intents=[stale])
+    loop.reason_checkpoints["proj_001"] = ReasonCheckpoint(fact_count=3, hint_count=1, open_intent_count=0)
+    loop.container_manager = type("Containers", (), {"container_name": lambda _self, project_id: project_id})()
+    loop.client = type(
+        "Client",
+        (),
+        {
+            "get_project": lambda _self, _project_id: project,
+            "export_project": lambda _self, _project_id: "graph",
+        },
+    )()
+    dispatched: list[str] = []
+    loop._dispatch_explore = lambda _project, _graph, intent: dispatched.append(intent.id) or True
+
+    assert loop._try_dispatch_project(_summary("proj_001", "active"))
+    assert dispatched == ["stale"]
+
+
+def test_project_open_intent_count_excludes_concluded() -> None:
+    loop = _loop()
+    open_intent = make_intent("open")
+    open_intent.worker = None
+    dead = make_intent("dead")
+    dead.worker = None
+    dead.concluded_as = "dead"
+    done = make_intent("done")
+    done.to = "f001"
+    project = make_project(intents=[open_intent, dead, done])
+
+    assert loop._project_open_intent_count(project) == 1
+
+
+def test_dead_bootstrap_intent_dispatches_reason_instead_of_bootstrap() -> None:
+    loop = _loop()
+    loop.config = make_config()
+    loop.futures = {}
+    bootstrap = make_intent("boot")
+    bootstrap.description = "bootstrap"
+    bootstrap.creator = "dispatcher.bootstrap"
+    bootstrap.from_ = ["origin"]
+    bootstrap.worker = None
+    bootstrap.concluded_as = "dead"
+    project = make_project(intents=[bootstrap])
+    project.facts = project.facts[:2]
+    loop.container_manager = type("Containers", (), {"container_name": lambda _self, project_id: project_id})()
+    loop.client = type(
+        "Client",
+        (),
+        {
+            "get_project": lambda _self, _project_id: project,
+            "export_project": lambda _self, _project_id: "graph",
+        },
+    )()
+    dispatched: list[tuple[str, str]] = []
+    loop._dispatch_reason = lambda _project, _graph, trigger: dispatched.append(("reason", trigger)) or True
+    loop._dispatch_initial_project = lambda _project: dispatched.append(("bootstrap", "")) or True
+
+    assert loop._try_dispatch_project(_summary("proj_001", "active"))
+    assert dispatched == [("reason", "bootstrap_dead")]

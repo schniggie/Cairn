@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from cairn.server.db import get_conn
 from cairn.server.models import (
@@ -8,10 +8,13 @@ from cairn.server.models import (
     Fact,
     HeartbeatRequest,
     Intent,
+    MarkIntentFailedRequest,
 )
 from cairn.server.services import (
     check_project_active,
+    expire_workers,
     get_claimable_open_intent_or_404,
+    get_intent_or_404,
     get_releasable_open_intent_or_404,
     intent_to_model,
     next_fact_id,
@@ -141,7 +144,7 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
             (fid, project_id, body.description),
         )
         conn.execute(
-            "UPDATE intents SET to_fact_id = ?, worker = ?, last_heartbeat_at = ?, concluded_at = ? WHERE id = ? AND project_id = ?",
+            "UPDATE intents SET to_fact_id = ?, worker = ?, last_heartbeat_at = ?, concluded_at = ?, concluded_as = 'success', retry_count = 0 WHERE id = ? AND project_id = ?",
             (fid, body.worker, now, now, intent_id, project_id),
         )
 
@@ -154,3 +157,41 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
             fact=Fact(id=fid, description=body.description),
             intent=intent_to_model(conn, updated, project_id),
         )
+
+
+@router.post(
+    "/projects/{project_id}/intents/{intent_id}/fail",
+    response_model=Intent,
+)
+def record_intent_failure(project_id: str, intent_id: str, body: MarkIntentFailedRequest):
+    with get_conn() as conn:
+        check_project_active(conn, project_id)
+        expire_workers(conn, project_id)
+        row = get_intent_or_404(conn, project_id, intent_id)
+        if row["to_fact_id"] is not None:
+            raise HTTPException(409, "Intent already concluded")
+
+        conn.execute(
+            "UPDATE intents SET retry_count = retry_count + 1 WHERE id = ? AND project_id = ?",
+            (intent_id, project_id),
+        )
+        row = conn.execute(
+            "SELECT retry_count, concluded_as FROM intents WHERE id = ? AND project_id = ?",
+            (intent_id, project_id),
+        ).fetchone()
+        new_concluded = None
+        if row["retry_count"] >= body.dead_retry_threshold:
+            new_concluded = "dead"
+        elif row["retry_count"] >= body.stale_retry_threshold:
+            new_concluded = "stale"
+        if new_concluded and row["concluded_as"] != "dead":
+            conn.execute(
+                "UPDATE intents SET concluded_as = ? WHERE id = ? AND project_id = ?",
+                (new_concluded, intent_id, project_id),
+            )
+
+        updated = conn.execute(
+            "SELECT * FROM intents WHERE id = ? AND project_id = ?",
+            (intent_id, project_id),
+        ).fetchone()
+        return intent_to_model(conn, updated, project_id)
