@@ -30,8 +30,10 @@ class _TestClientSession:
 @pytest.fixture
 def client(tmp_path, monkeypatch) -> TestClient:
     monkeypatch.setattr(db, "_db_path", None)
+    monkeypatch.setenv("CAIRN_ADMIN_TOKEN", "test-admin")
+    monkeypatch.setattr("cairn.server.app.ADMIN_TOKEN", "test-admin")
     db.configure(tmp_path / "cairn.db")
-    with TestClient(app) as test_client:
+    with TestClient(app, headers={"Authorization": "Bearer test-admin"}) as test_client:
         yield test_client
 
 

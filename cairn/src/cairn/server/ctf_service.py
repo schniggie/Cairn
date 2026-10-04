@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 
@@ -91,8 +93,70 @@ def load_config(conn: sqlite3.Connection, *, full: bool = False) -> dict:
     return data
 
 
+def _endpoint_identity(value: object) -> str:
+    text = "" if value is None else str(value).strip()
+    if "://" not in text:
+        return text.rstrip("/").lower()
+    parsed = urlsplit(text)
+    host = (parsed.hostname or "").lower()
+    port = f":{parsed.port}" if parsed.port else ""
+    return f"{parsed.scheme.lower()}://{host}{port}{parsed.path.rstrip('/')}"
+
+
+def _secret_resupplied(body: dict, key: str) -> bool:
+    return key in body and body[key] != _TOKEN_MASK
+
+
+def _reject_endpoint_redirect(current: dict, body: dict) -> None:
+    """A stored token must be typed again when its destination host changes."""
+    pairs = (("base_url", "token"), ("model_base_url", "model_api_key"))
+    for endpoint_key, secret_key in pairs:
+        if endpoint_key not in body:
+            continue
+        if _endpoint_identity(body.get(endpoint_key)) == _endpoint_identity(current.get(endpoint_key)):
+            continue
+        if current.get(secret_key) and not _secret_resupplied(body, secret_key):
+            raise HTTPException(422, f"re-supply {secret_key} when changing {endpoint_key}")
+
+
+_SUBMIT_AT: dict[tuple[str, int], float] = {}
+
+
+def reserve_submission(conn: sqlite3.Connection, challenge_id: int) -> None:
+    """Consume one attempt before the platform request, or refuse.
+
+    ``submission_max_retries`` is the per-challenge budget. ``rate_limit_backoff``
+    is the minimum gap between manual submissions of the same challenge. Neither
+    check waits for the bridge retry loop.
+    """
+    cfg = load_config(conn, full=False)
+    max_attempts = int(cfg["submission_max_retries"])
+    backoff = int(cfg["rate_limit_backoff"] or 0)
+    db_row = conn.execute("PRAGMA database_list").fetchone()
+    db_key = str(db_row["file"] if db_row is not None else "")
+    rate_key = (db_key, challenge_id)
+    now = time.monotonic()
+    if backoff > 0:
+        previous = _SUBMIT_AT.get(rate_key)
+        if previous is not None and now - previous < backoff:
+            raise HTTPException(429, "per-challenge submission rate budget exceeded")
+    updated = conn.execute(
+        """
+        UPDATE ctf_challenges
+        SET attempt_count = attempt_count + 1, updated_at = ?
+        WHERE id = ? AND attempt_count < ?
+        """,
+        (utcnow(), challenge_id, max_attempts),
+    )
+    if updated.rowcount != 1:
+        raise HTTPException(429, "per-challenge submission budget exhausted")
+    _SUBMIT_AT[rate_key] = now
+
+
 def update_config(conn: sqlite3.Connection, body: dict) -> dict:
     """Apply a partial config update. Returns the fresh config (masked)."""
+    current = load_config(conn, full=True)
+    _reject_endpoint_redirect(current, body)
     columns = (
         "adapter",
         "base_url",

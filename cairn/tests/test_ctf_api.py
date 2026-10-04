@@ -10,8 +10,9 @@ from cairn.server.app import app
 @pytest.fixture
 def client(tmp_path, monkeypatch) -> TestClient:
     monkeypatch.setattr(db, "_db_path", None)
+    monkeypatch.setattr("cairn.server.app.ADMIN_TOKEN", "test-admin")
     db.configure(tmp_path / "cairn.db")
-    with TestClient(app) as test_client:
+    with TestClient(app, headers={"Authorization": "Bearer test-admin"}) as test_client:
         yield test_client
 
 
@@ -63,7 +64,7 @@ def test_config_put_and_token_masking(client: TestClient, monkeypatch: pytest.Mo
     public = client.get("/ctf/config?full=true").json()
     assert public["token"] == "***"
     assert public["team_name"] == "team-a"
-    assert client.get("/ctf/internal/config").status_code == 403
+    assert client.get("/ctf/internal/config", headers={"Authorization": ""}).status_code == 403
 
     monkeypatch.setattr("cairn.server.app.ADMIN_TOKEN", "admin-secret")
     headers = {"Authorization": "Bearer admin-secret"}
@@ -208,7 +209,7 @@ def test_config_extra_fields_and_model_secret_masking(client: TestClient, monkey
     assert body["model_api_key"] == "***"
 
     assert client.get("/ctf/config?full=true").json()["model_api_key"] == "***"
-    assert client.get("/ctf/internal/config").status_code == 403
+    assert client.get("/ctf/internal/config", headers={"Authorization": ""}).status_code == 403
 
     monkeypatch.setattr("cairn.server.app.ADMIN_TOKEN", "admin-secret")
     headers = {"Authorization": "Bearer admin-secret"}
@@ -287,3 +288,90 @@ def test_manual_submit_with_mock_adapter(client: TestClient) -> None:
     )
     assert response.json()["ok"] is False
     assert response.json()["status"] == "wrong_flag"
+
+
+def test_ctf_mutations_fail_closed_without_admin_token(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("cairn.server.app.ADMIN_TOKEN", "")
+    anonymous = TestClient(app)
+    assert anonymous.put("/ctf/config", json={"base_url": "https://evil.example"}).status_code == 403
+    assert anonymous.put("/ctf/mode", json={"mode": "ctf"}).status_code == 403
+    assert anonymous.post("/ctf/test").status_code == 403
+    assert anonymous.post("/ctf/test-model").status_code == 403
+    assert anonymous.post("/ctf/submit", json={"challenge_id": "1", "flag": "flag{x}"}).status_code == 403
+    assert anonymous.get("/ctf/config").status_code == 200
+
+
+def test_model_endpoint_change_requires_a_new_secret(client: TestClient) -> None:
+    saved = client.put(
+        "/ctf/config",
+        json={"base_url": "https://ctf.example", "token": "platform-token", "model_base_url": "https://llm.example", "model_api_key": "sk-real"},
+    )
+    assert saved.status_code == 200
+    platform = client.put("/ctf/config", json={"base_url": "https://evil.example"})
+    assert platform.status_code == 422
+    assert "re-supply token" in platform.text
+    redirected = client.put("/ctf/config", json={"model_base_url": "https://evil.example/v1"})
+    assert redirected.status_code == 422
+    assert "re-supply model_api_key" in redirected.text
+    masked = client.put("/ctf/config", json={"model_base_url": "https://evil.example/v1", "model_api_key": "***"})
+    assert masked.status_code == 422
+    accepted = client.put(
+        "/ctf/config",
+        json={"model_base_url": "https://evil.example/v1", "model_api_key": "sk-real"},
+    )
+    assert accepted.status_code == 200
+
+
+class _SpySource:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def submit_flag(self, external_id: str, flag: str):
+        from cairn.ctfbridge.adapters.base import SubmissionResult
+
+        self.calls.append(flag)
+        return SubmissionResult.WRONG_FLAG, "rejected"
+
+
+def _install_submit_spy(monkeypatch: pytest.MonkeyPatch) -> _SpySource:
+    spy = _SpySource()
+
+    def fake_get_adapter(name: str, **cfg):
+        return spy
+
+    monkeypatch.setattr("cairn.server.routers.ctf.get_adapter", fake_get_adapter)
+    return spy
+
+
+def test_manual_submit_stops_before_the_platform_when_budget_is_spent(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    saved = client.put(
+        "/ctf/config",
+        json={"adapter": "mock", "base_url": "http://mock.invalid", "submission_max_retries": 1, "rate_limit_backoff": 1},
+    )
+    assert saved.status_code == 200
+    created = client.post("/ctf/challenges", json=_make_challenge(external_id="mock-trap")).json()
+    spy = _install_submit_spy(monkeypatch)
+    first = client.post("/ctf/submit", json={"challenge_id": str(created["id"]), "flag": "flag{nope}"})
+    assert first.status_code == 200
+    assert spy.calls == ["flag{nope}"]
+    from cairn.server import ctf_service
+
+    ctf_service._SUBMIT_AT.clear()
+    second = client.post("/ctf/submit", json={"challenge_id": str(created["id"]), "flag": "flag{again}"})
+    assert second.status_code == 429
+    assert "budget exhausted" in second.text
+    assert spy.calls == ["flag{nope}"]
+
+
+def test_manual_submit_honors_per_challenge_rate_budget(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    client.put(
+        "/ctf/config",
+        json={"adapter": "mock", "base_url": "http://mock.invalid", "submission_max_retries": 5, "rate_limit_backoff": 60},
+    )
+    created = client.post("/ctf/challenges", json=_make_challenge(external_id="mock-rate")).json()
+    spy = _install_submit_spy(monkeypatch)
+    assert client.post("/ctf/submit", json={"challenge_id": str(created["id"]), "flag": "flag{a}"}).status_code == 200
+    limited = client.post("/ctf/submit", json={"challenge_id": str(created["id"]), "flag": "flag{b}"})
+    assert limited.status_code == 429
+    assert "rate budget" in limited.text
+    assert spy.calls == ["flag{a}"]

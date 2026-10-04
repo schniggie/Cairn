@@ -11,6 +11,28 @@ from cairn.dispatcher.runtime.local_process import LocalProcess
 LOG = logging.getLogger(__name__)
 
 
+def _dispatcher_owned(resolved: Path) -> bool:
+    """Prompt snapshots and Pi assets are written by the dispatcher, not by init files."""
+    from cairn.dispatcher.tasks import common as common_mod
+
+    roots = [Path(common_mod.GRAPH_SNAPSHOT_ROOT), Path("/tmp/cairn-pi")]
+    for root in roots:
+        try:
+            base = root.resolve()
+        except OSError:
+            continue
+        if resolved == base or resolved.is_relative_to(base):
+            return True
+    return False
+
+
+def _lexical_destination(target: Path) -> Path:
+    parent = target.parent
+    if parent.exists():
+        return parent.resolve() / target.name
+    return Path(os.path.abspath(target))
+
+
 class LocalBackend:
     """Runs workers directly on the dispatcher host instead of in per-project containers.
 
@@ -94,16 +116,30 @@ class LocalBackend:
         )
 
     def write_text_file(self, container_name: str, path: str, content: str) -> None:
-        target = self._local_target(path)
+        target = self._confined_target(container_name, path)
         target.write_text(content, encoding="utf-8")
 
     def write_binary_file(self, container_name: str, path: str, data: bytes) -> None:
-        self._local_target(path).write_bytes(data)
+        self._confined_target(container_name, path).write_bytes(data)
 
-    def _local_target(self, path: str) -> Path:
+    def _confined_target(self, container_name: str, path: str) -> Path:
+        """Write an absolute path that stays inside the project workspace.
+
+        ``container_name`` is the project directory for local execution. Init files
+        are resolved there before this call. Dispatcher files under that directory
+        (skills) are allowed. Paths outside it are rejected, except the two
+        dispatcher trees ``/tmp/cairn-prompts`` and ``/tmp/cairn-pi``.
+        """
         target = Path(path)
         if not target.is_absolute():
             raise ValueError(f"local file path must be absolute: {path}")
+        workspace = Path(container_name)
+        if workspace.is_absolute() and workspace.is_dir() and not workspace.is_symlink():
+            root = workspace.resolve()
+            resolved = target.resolve() if target.exists() else _lexical_destination(target)
+            inside = resolved == root or resolved.is_relative_to(root)
+            if not inside and not _dispatcher_owned(resolved):
+                raise ValueError(f"local file path escapes the project workspace: {path}")
         target.parent.mkdir(parents=True, exist_ok=True)
         return target
 

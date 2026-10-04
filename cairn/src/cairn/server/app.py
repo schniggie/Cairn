@@ -58,11 +58,11 @@ _WORKER_WRITE_SUFFIXES = (
 class AdminTokenMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        # Saved research content and dispatch config can redirect or reveal
-        # credentials. They refuse traffic when no admin token is configured.
-        # Project, skill, engine, and CTF management stay open in that local-dev
-        # case and require the bearer only after CAIRN_ADMIN_TOKEN is set.
-        if fails_closed(path):
+        # Research content, dispatch config, and credentialed CTF mutations
+        # refuse traffic when no admin token is configured. Project, skill, and
+        # engine reads stay open in that local-dev case and require the bearer
+        # only after CAIRN_ADMIN_TOKEN is set.
+        if fails_closed(path, request.method):
             if not admin_token_matches(request.headers.get("Authorization", "")):
                 return Response(status_code=403, content="Forbidden")
             return await call_next(request)

@@ -258,6 +258,7 @@ class ContainerManager:
         self._put_archive(container_name, path, data)
 
     def _put_archive(self, container_name: str, path: str, payload: bytes) -> None:
+        self._reject_container_escape(path)
         archive_path, archive = self._file_archive(path, payload)
         container = self._require_container(container_name)
         try:
@@ -266,6 +267,21 @@ class ContainerManager:
             raise RuntimeError(f"failed to write container file {path}: {exc}") from exc
         if not ok:
             raise RuntimeError(f"failed to write container file {path}")
+
+    @staticmethod
+    def _reject_container_escape(path: str) -> None:
+        """Init files stay under /workspace. Dispatcher files stay under /tmp/cairn-."""
+        if path.startswith("/tmp/cairn-"):
+            return
+        if path.startswith("/workspace"):
+            from cairn.dispatcher.runtime.workspace_files import InitFilePathError, relative_init_path
+
+            try:
+                relative_init_path(path)
+            except InitFilePathError as exc:
+                raise ValueError(str(exc)) from exc
+            return
+        raise ValueError(f"container file path escapes the project workspace: {path}")
 
     def _start_existing(self, name: str) -> None:
         LOG.debug("starting container=%s", name)

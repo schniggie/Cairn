@@ -20,9 +20,12 @@ def _client(tmp_path, monkeypatch) -> TestClient:
 
 
 def test_project_records_backend_and_root(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("cairn.server.app.ADMIN_TOKEN", "test-admin")
+    headers = {"Authorization": "Bearer test-admin"}
     with _client(tmp_path, monkeypatch) as client:
         created = client.post(
             "/projects",
+            headers=headers,
             json={
                 "title": "local",
                 "origin": "start",
@@ -35,7 +38,7 @@ def test_project_records_backend_and_root(tmp_path, monkeypatch) -> None:
         project = created.json()["project"]
         assert project["backend"] == "local"
         assert project["project_root"] == "/tmp/sample-root"
-        listed = client.get("/projects").json()[0]
+        listed = client.get("/projects", headers=headers).json()[0]
         assert listed["backend"] == "local"
 
 

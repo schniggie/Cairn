@@ -133,12 +133,12 @@ def test_write_text_file_uses_archive_api_and_rejects_false_result() -> None:
     container = FakeContainer()
     manager._require_container = lambda _name: container
 
-    manager.write_text_file("container", "/tmp/graph.yaml", "facts: []\n")
+    manager.write_text_file("container", "/tmp/cairn-prompts/graph.yaml", "facts: []\n")
     assert container.archives[0][0] == "/tmp"
 
     container.archive_result = False
     try:
-        manager.write_text_file("container", "/tmp/graph.yaml", "facts: []\n")
+        manager.write_text_file("container", "/tmp/cairn-prompts/graph.yaml", "facts: []\n")
     except RuntimeError as exc:
         assert "failed to write container file" in str(exc)
     else:

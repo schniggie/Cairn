@@ -25,9 +25,12 @@ def client(tmp_path, monkeypatch) -> TestClient:
         yield test_client
 
 
-def test_create_project_persists_init_files(client: TestClient) -> None:
+def test_create_project_persists_init_files(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("cairn.server.app.ADMIN_TOKEN", "test-admin")
+    headers = {"Authorization": "Bearer test-admin"}
     created = client.post(
         "/projects",
+        headers=headers,
         json={
             "title": "seeded",
             "origin": "start",
@@ -45,7 +48,7 @@ def test_create_project_persists_init_files(client: TestClient) -> None:
     assert files[1]["encoding"] == "base64"
 
     project_id = created.json()["project"]["id"]
-    loaded = client.get(f"/projects/{project_id}")
+    loaded = client.get(f"/projects/{project_id}", headers=headers)
     assert loaded.status_code == 200
     assert [item["path"] for item in loaded.json()["init_files"]] == [
         "/workspace/notes.txt",
@@ -147,6 +150,9 @@ def test_research_and_dispatch_config_fail_closed_without_token(monkeypatch) -> 
         assert test_client.get("/dispatch-config").status_code == 403
         assert test_client.get("/api/research/sessions").status_code == 403
         assert test_client.get("/ctf/config").status_code == 404
+        assert test_client.put("/ctf/config").status_code == 403
+        assert test_client.post("/ctf/test").status_code == 403
+        assert test_client.post("/ctf/submit").status_code == 403
 
 
 def test_claude_and_codex_extract_tool_trajectories() -> None:

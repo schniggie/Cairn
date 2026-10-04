@@ -195,10 +195,13 @@ class CreateInitFileInline(BaseModel):
     @field_validator("path")
     @classmethod
     def validate_path(cls, value: str) -> str:
-        text = value.strip()
-        if not text:
-            raise ValueError("path must not be empty")
-        return text
+        from cairn.dispatcher.runtime.workspace_files import InitFilePathError, relative_init_path
+
+        try:
+            relative_init_path(value)
+        except InitFilePathError as exc:
+            raise ValueError(str(exc)) from exc
+        return value.strip()
 
 
 class CreateHintInline(BaseModel):

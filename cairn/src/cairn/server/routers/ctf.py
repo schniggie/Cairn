@@ -12,9 +12,10 @@ import secrets
 import time
 
 import requests
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from cairn.ctfbridge.adapters import get_adapter
+from cairn.server.admin_auth import admin_token_matches, require_admin
 from cairn.server import ctf_service
 from cairn.server.db import get_conn
 from cairn.server.models import (
@@ -73,13 +74,13 @@ def get_internal_config(request: Request):
         return ctf_service.load_config(conn, full=True)
 
 
-@router.put("/config", response_model=CtfConfig)
+@router.put("/config", response_model=CtfConfig, dependencies=[Depends(require_admin)])
 def put_config(body: CtfConfigUpdate):
     with get_conn() as conn:
         return ctf_service.mask_config(ctf_service.update_config(conn, body.model_dump(exclude_none=True)))
 
 
-@router.put("/mode", response_model=CtfConfig)
+@router.put("/mode", response_model=CtfConfig, dependencies=[Depends(require_admin)])
 def put_mode(body: CtfModeRequest):
     with get_conn() as conn:
         return ctf_service.mask_config(ctf_service.set_mode(conn, body.mode.value))
@@ -158,11 +159,14 @@ _OVERVIEW_TTL = 30.0
 
 
 @router.get("/status")
-def get_status():
+def get_status(request: Request):
     with get_conn() as conn:
         payload = ctf_service.status_payload(conn)
     # Merge the platform score/rank (cached, so polling /ctf/status does not
-    # hit the platform on every request).
+    # hit the platform on every request). The overview call sends the stored
+    # platform token, so an anonymous status read stays local.
+    if not admin_token_matches(request.headers.get("Authorization", "")):
+        return payload
     now = time.monotonic()
     if now - _OVERVIEW_CACHE["at"] > _OVERVIEW_TTL:
         try:
@@ -176,7 +180,7 @@ def get_status():
     return payload
 
 
-@router.post("/test", response_model=CtfTestResult)
+@router.post("/test", response_model=CtfTestResult, dependencies=[Depends(require_admin)])
 def test_connection():
     _, _, source = _adapter_from_config()
     try:
@@ -186,7 +190,7 @@ def test_connection():
     return CtfTestResult(ok=True, detail="connection ok")
 
 
-@router.post("/test-model", response_model=CtfTestResult)
+@router.post("/test-model", response_model=CtfTestResult, dependencies=[Depends(require_admin)])
 def test_model_connection():
     """Probe the configured LLM endpoint (Anthropic-compatible /v1/messages).
 
@@ -254,11 +258,12 @@ def heartbeat(body: CtfHeartbeatRequest):
         )
 
 
-@router.post("/submit")
+@router.post("/submit", dependencies=[Depends(require_admin)])
 def submit_flag(body: CtfSubmitRequest):
     with get_conn() as conn:
         row = _resolve_challenge_row(conn, body.challenge_id)
         external_id = row["external_id"]
+        ctf_service.reserve_submission(conn, int(row["id"]))
 
     _, _, source = _adapter_from_config()
     try:
@@ -280,7 +285,6 @@ def submit_flag(body: CtfSubmitRequest):
             {
                 "status": status,
                 "last_flag": body.flag,
-                "attempt_count": row["attempt_count"] + 1,
             },
         )
     return {"ok": result.value == "success", "detail": message, "status": updated.status}

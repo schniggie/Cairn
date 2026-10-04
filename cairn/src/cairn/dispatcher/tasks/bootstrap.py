@@ -647,12 +647,23 @@ def _inject_init_files(container_manager, container_name: str, project) -> None:
     """Write project init_files into the worker workspace before execution."""
     import base64
 
+    from cairn.dispatcher.runtime.workspace_files import (
+        InitFilePathError,
+        container_init_destination,
+        local_init_destination,
+    )
+
+    local = type(container_manager).__name__ == "LocalBackend"
     init_files = getattr(project, "init_files", None) or []
     for item in init_files:
         try:
-            if item.encoding == "base64":
-                container_manager.write_binary_file(container_name, item.path, base64.b64decode(item.content))
+            if local:
+                destination = str(local_init_destination(container_name, item.path))
             else:
-                container_manager.write_text_file(container_name, item.path, item.content)
-        except Exception as exc:
+                destination = container_init_destination(item.path)
+            if item.encoding == "base64":
+                container_manager.write_binary_file(container_name, destination, base64.b64decode(item.content))
+            else:
+                container_manager.write_text_file(container_name, destination, item.content)
+        except (InitFilePathError, ValueError, OSError) as exc:
             LOG.warning("failed to inject init_file path=%s project=%s error=%s", item.path, project.project.id, exc)

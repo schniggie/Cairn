@@ -1,4 +1,6 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+
+from cairn.server.admin_auth import require_admin
 
 from cairn.server.db import get_conn
 from cairn.server.event_store import insert_runtime_event
@@ -83,7 +85,11 @@ def list_projects():
 
 
 @router.post("/projects", response_model=ProjectDetail, status_code=201)
-def create_project(body: CreateProjectRequest):
+def create_project(body: CreateProjectRequest, request: Request):
+    # Selecting the host backend or seeding files is a privileged side effect.
+    # A normal project create (title, origin, goal) stays available for local dev.
+    if body.backend is not None or body.init_files:
+        require_admin(request)
     with get_conn() as conn:
         pid = next_project_id(conn)
         now = utcnow()
