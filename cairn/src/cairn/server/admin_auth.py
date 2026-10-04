@@ -33,10 +33,22 @@ _CTF_FAIL_CLOSED = frozenset(
 )
 
 
+_SKILL_MUTATIONS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _skill_mutation(path: str, method: str) -> bool:
+    """Skill writes create files on disk. Reads stay open for local development."""
+    if method.upper() not in _SKILL_MUTATIONS:
+        return False
+    return path == "/skills" or path.startswith("/skills/")
+
+
 def fails_closed(path: str, method: str = "GET") -> bool:
     if any(path == prefix or path.startswith(prefix + "/") for prefix in _FAIL_CLOSED_PREFIXES):
         return True
-    return (method.upper(), path) in _CTF_FAIL_CLOSED
+    if (method.upper(), path) in _CTF_FAIL_CLOSED:
+        return True
+    return _skill_mutation(path, method)
 
 
 def configured_admin_token() -> str:

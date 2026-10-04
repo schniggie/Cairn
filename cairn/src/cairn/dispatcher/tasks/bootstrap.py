@@ -11,7 +11,7 @@ from cairn.dispatcher.contracts import (
     validate_bootstrap_conclude_payload,
     validate_bootstrap_execute_payload,
 )
-from cairn.dispatcher.prompting import format_hints, load_prompt, render_prompt
+from cairn.dispatcher.prompting import already_fenced, fence_untrusted, format_hints, load_prompt, render_prompt
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.containers import ContainerManager
@@ -548,7 +548,11 @@ def _bootstrap_prompt_replacements(project: ProjectDetail) -> dict[str, str]:
     hints = [
         {
             "id": hint.id,
-            "content": hint.content,
+            "content": (
+                hint.content
+                if hint.creator != "ctf" or already_fenced(hint.content)
+                else fence_untrusted(hint.content)
+            ),
             "creator": hint.creator,
             "created_at": hint.created_at,
         }

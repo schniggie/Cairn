@@ -383,6 +383,19 @@ def write_graph_snapshot_reference(
     )
 
 
+def apply_worker_subprocess_guards(worker: WorkerConfig, env: dict[str, str]) -> dict[str, str]:
+    """Keep provider credentials out of Claude Code tool subprocesses.
+
+    Claude Code 2.1.98 strips Anthropic and cloud-provider credentials from Bash,
+    hook, and MCP stdio children when this variable is ``1``. The parent process
+    still needs the token to call the model API. This does not close worker egress.
+    """
+    guarded = dict(env)
+    if worker.type == "claudecode":
+        guarded["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "1"
+    return guarded
+
+
 def run_worker_process(
     container_manager: ExecutionBackend,
     container_name: str,
@@ -409,7 +422,7 @@ def run_worker_process(
     for asset in command.assets:
         container_manager.write_text_file(container_name, asset.path, asset.content)
 
-    exec_env = dict(worker.env)
+    exec_env = apply_worker_subprocess_guards(worker, dict(worker.env))
     project_id = safety_context.project_id if safety_context is not None else None
     if project_id and hasattr(container_manager, "project_env"):
         exec_env.update(container_manager.project_env(project_id))

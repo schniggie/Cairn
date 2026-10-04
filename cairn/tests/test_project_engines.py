@@ -44,17 +44,20 @@ def test_project_records_backend_and_root(tmp_path, monkeypatch) -> None:
 
 def test_skills_round_trip(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CAIRN_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("cairn.server.app.ADMIN_TOKEN", "test-admin")
+    headers = {"Authorization": "Bearer test-admin"}
     with _client(tmp_path, monkeypatch) as client:
         created = client.post(
             "/skills",
+            headers=headers,
             json={"name": "recon-scan", "content": "---\nname: recon-scan\ndescription: scan\n---\n# Scan\n"},
         )
         assert created.status_code == 201
         assert created.json()["description"] == "scan"
-        listed = client.get("/skills").json()
+        listed = client.get("/skills", headers=headers).json()
         assert listed[0]["name"] == "recon-scan"
-        assert client.delete("/skills/recon-scan").status_code == 200
-        assert client.get("/skills").json() == []
+        assert client.delete("/skills/recon-scan", headers=headers).status_code == 200
+        assert client.get("/skills", headers=headers).json() == []
 
 
 def test_opencode_uses_provider_wrapper_only_when_configured() -> None:

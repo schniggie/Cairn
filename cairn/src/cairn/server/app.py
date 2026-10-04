@@ -71,6 +71,7 @@ class AdminTokenMiddleware(BaseHTTPMiddleware):
             or path.startswith("/skills")
             or path.startswith("/engines")
             or path.startswith("/ctf")
+            or path.startswith("/events")
         )
         if ADMIN_TOKEN and protected:
             if request.method == "POST" and path.startswith("/projects") and any(

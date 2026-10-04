@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 import requests
 
 from cairn.ctfbridge.adapters import get_adapter
+from cairn.dispatcher.prompting import fence_untrusted
 from cairn.ctfbridge.adapters.base import ChallengeSource, SubmissionResult
 from cairn.ctfbridge.client import BridgeError, CairnApi
 from cairn.ctfbridge.config import BridgeConfig, load_bridge_config
@@ -311,7 +312,7 @@ class CtfBridge:
         origin = self._build_origin(detail)
         goal = f"找到该题的 flag（形如 {cfg.flag_regex}）并将其提交到 CTF 平台。"
 
-        hints = [{"content": h, "creator": "ctf"} for h in detail.hints]
+        hints = [{"content": fence_untrusted(h), "creator": "ctf"} for h in detail.hints]
         project = self.api.create_project(title=title, origin=origin, goal=goal, hints=hints)
         return project["project"]["id"]
 
@@ -322,7 +323,7 @@ class CtfBridge:
         if detail.attachments:
             parts.append("附件下载：")
             parts.extend(f"- {url}" for url in detail.attachments)
-        return "\n".join(parts)
+        return fence_untrusted("\n".join(parts))
 
     # ---------------------------------------------------------- completion
 

@@ -107,7 +107,9 @@ The upstream modules are on branch `cursor/spdc-elm-ssh-runtime-1070` under `int
 
 **Skipped.** `dist/*.zip` build artifacts. The English README was not replaced. `index.html` was not swapped for the Chinese CTF dashboard (about +1200 lines on top of the audit UI). The zh release workflow no longer passes `--latest`, so a `vX.Y.Z-zh` tag does not steal the repository's latest release.
 
-**Review.** CTF tokens and model API keys are stored in sqlite. `GET /ctf/config` masks them; `?full=true` returns the raw values. The bridge is a separate process from the dispatcher.
+**Review.** CTF tokens and model API keys are stored in sqlite. `GET /ctf/config` always masks them. Raw values are only on `GET /ctf/internal/config`, which requires the admin bearer. The bridge is a separate process from the dispatcher.
+
+Platform challenge text (description, target, attachments, hints) is wrapped as `UNTRUSTED PLATFORM DATA` before it enters Origin or Hints. Bootstrap, explore, reason, and verify prompts tell the worker that block is data, not instructions. Claude Code workers set `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` (also an `ENV` in `container/Dockerfile` for the pinned `@anthropic-ai/claude-code@2.1.98` image) so Bash, hook, and MCP stdio children do not inherit the provider credential. The parent `claude` process still has the token, because that is how it calls the model API.
 
 ## 14. XVSHIFU/Cairn `feat/research-workbench`
 
@@ -140,3 +142,12 @@ Merging either alternative PR only adds the upstream source under `integrations/
 - Auth control plane defaults to `legacy`. Set `auth` and `auth_control_plane_mode` only when you want the helper and fire path. If `CAIRN_ADMIN_TOKEN` and `server_token` are both set, project calls use the admin token and `/auth` calls use `server_token`.
 - Ghidra in the worker image increases build time and image size; the download URL can move.
 - Chrome DevTools wrapper is not installed in the image until `chrome-devtools-mcp` is added to the Dockerfile.
+
+## Known residual risk: CTF prompt injection and worker egress
+
+Platform text is labeled untrusted and Claude Code 2.1.98 tool subprocesses scrub provider credentials, but this is not a complete containment boundary.
+
+- A worker still runs with `--dangerously-skip-permissions`. A malicious challenge can still steer tool use. The scrub stops Anthropic and cloud-provider credentials from appearing in those tool subprocesses; it does not stop the model from sending other workspace data to a network destination.
+- There is no server-side model proxy in the worker path, and worker egress is not allowlisted. Compose and dispatch examples can use `network_mode: host`. `scripts/llm_proxy.py` is not wired in front of worker traffic.
+- Codex, Pi, OpenCode, and Gemini do not get `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`. Local execution merges the host environment into the worker process, so other host secrets can still be visible to that process.
+- Prompt fences are a model instruction, not a sandbox. Treat external CTF platforms as untrusted input sources and keep provider credentials off hosts that run auto-approved workers until egress is restricted.

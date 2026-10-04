@@ -5,14 +5,21 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import zipfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _REGISTRY = ".registry.json"
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024
+MAX_ZIP_ENTRIES = 256
+MAX_MEMBER_BYTES = 1 * 1024 * 1024
+MAX_TOTAL_BYTES = 8 * 1024 * 1024
+MAX_COMPRESSION_RATIO = 100
+_READ_CHUNK = 64 * 1024
 
 
 @dataclass(slots=True)
@@ -33,7 +40,7 @@ def skills_root() -> Path:
 
 
 def _validate_name(name: str) -> str:
-    if not _NAME_RE.match(name or ""):
+    if not name or name.startswith(".") or not _NAME_RE.match(name):
         raise ValueError(f"invalid skill name: {name!r}")
     return name
 
@@ -92,7 +99,7 @@ def list_skills() -> list[SkillMeta]:
     reg = _load_registry()
     out: list[SkillMeta] = []
     for child in sorted(root.iterdir()):
-        if not child.is_dir():
+        if not child.is_dir() or child.name.startswith("."):
             continue
         skill_md = child / "SKILL.md"
         if not skill_md.is_file():
@@ -144,25 +151,102 @@ def set_enabled(name: str, enabled: bool) -> None:
 
 
 def import_zip(data: bytes) -> str:
-    with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        names = [n for n in zf.namelist() if not n.startswith("/") and ".." not in n]
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise ValueError("zip archive exceeds the upload size limit")
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as exc:
+        raise ValueError("zip archive is not valid") from exc
+    with archive:
+        infos = archive.infolist()
+        if len(infos) > MAX_ZIP_ENTRIES:
+            raise ValueError("zip archive has too many entries")
+        _reject_zip_expansion(infos)
+        names = [_zip_member_name(info) for info in infos]
         tops = {n.split("/", 1)[0] for n in names if "/" in n}
         if len(tops) != 1:
             raise ValueError("zip must contain exactly one top-level skill directory")
         skill_name = _validate_name(next(iter(tops)))
         if not any(n == f"{skill_name}/SKILL.md" for n in names):
             raise ValueError("zip skill directory must contain SKILL.md")
-        dest = skills_root() / skill_name
-        shutil.rmtree(dest, ignore_errors=True)
-        dest.mkdir(parents=True, exist_ok=True)
-        for n in names:
-            if n.endswith("/"):
-                continue
-            rel = n.split("/", 1)[1] if "/" in n else n
-            target = dest / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(zf.read(n))
+        root = skills_root()
+        root.mkdir(parents=True, exist_ok=True)
+        if root.is_symlink():
+            raise ValueError("skills directory must not be a symlink")
+        dest = root / skill_name
+        staging = Path(tempfile.mkdtemp(prefix=".upload-", dir=root))
+        try:
+            total = 0
+            for info, name in zip(infos, names, strict=True):
+                if name.endswith("/") or info.is_dir():
+                    continue
+                rel = name.split("/", 1)[1]
+                target = _member_target(staging, rel)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                total = _copy_member(archive, info, target, total)
+            if dest.exists() or dest.is_symlink():
+                shutil.rmtree(dest)
+            staging.rename(dest)
+            staging = None
+        finally:
+            if staging is not None:
+                shutil.rmtree(staging, ignore_errors=True)
     return skill_name
+
+
+def _zip_member_name(info: zipfile.ZipInfo) -> str:
+    name = info.filename.replace("\\", "/")
+    if name.startswith("/") or "\x00" in name:
+        raise ValueError("zip member path escapes the skill directory")
+    parts = PurePosixPath(name).parts
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise ValueError("zip member path escapes the skill directory")
+    return "/".join(parts) + ("/" if name.endswith("/") else "")
+
+
+def _reject_zip_expansion(infos: list[zipfile.ZipInfo]) -> None:
+    total = 0
+    for info in infos:
+        declared = info.file_size
+        if declared < 0 or declared > MAX_MEMBER_BYTES:
+            raise ValueError("zip member exceeds the expanded size limit")
+        total += declared
+        if total > MAX_TOTAL_BYTES:
+            raise ValueError("zip archive exceeds the expanded size limit")
+        compressed = info.compress_size
+        if declared and (compressed <= 0 or declared / compressed > MAX_COMPRESSION_RATIO):
+            raise ValueError("zip member exceeds the compression ratio limit")
+
+
+def _member_target(staging: Path, rel: str) -> Path:
+    parts = PurePosixPath(rel).parts
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise ValueError("zip member path escapes the skill directory")
+    target = staging.joinpath(*parts)
+    root = staging.resolve()
+    parent = target.parent.resolve() if target.parent.exists() else root
+    if parent != root and not parent.is_relative_to(root):
+        raise ValueError("zip member path escapes the skill directory")
+    return target
+
+
+def _copy_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo, target: Path, total: int) -> int:
+    written = 0
+    try:
+        source = archive.open(info)
+    except RuntimeError as exc:
+        raise ValueError("zip member cannot be extracted") from exc
+    with source, target.open("wb") as out:
+        while True:
+            chunk = source.read(_READ_CHUNK)
+            if not chunk:
+                break
+            written += len(chunk)
+            total += len(chunk)
+            if written > MAX_MEMBER_BYTES or total > MAX_TOTAL_BYTES:
+                raise ValueError("zip member exceeds the expanded size limit")
+            out.write(chunk)
+    return total
 
 
 def enabled_skill_dirs() -> list[Path]:

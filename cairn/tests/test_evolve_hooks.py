@@ -153,6 +153,9 @@ def test_research_and_dispatch_config_fail_closed_without_token(monkeypatch) -> 
         assert test_client.put("/ctf/config").status_code == 403
         assert test_client.post("/ctf/test").status_code == 403
         assert test_client.post("/ctf/submit").status_code == 403
+        assert test_client.post("/skills").status_code == 403
+        assert test_client.post("/skills/upload").status_code == 403
+        assert test_client.get("/skills").status_code == 404
 
 
 def test_claude_and_codex_extract_tool_trajectories() -> None:

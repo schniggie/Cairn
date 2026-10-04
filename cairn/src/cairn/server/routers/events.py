@@ -4,9 +4,10 @@ import json
 import time
 from collections.abc import Iterator
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import StreamingResponse
 
+from cairn.server.admin_auth import require_admin
 from cairn.server.db import get_conn
 from cairn.server.event_store import insert_runtime_event, runtime_event_from_row
 from cairn.server.models import CreateRuntimeEventRequest, RuntimeEvent
@@ -34,7 +35,13 @@ def create_project_event(project_id: str, body: CreateRuntimeEventRequest):
 
 
 @router.get("/events/stream")
-def stream_events(project_id: str | None = None, after_id: int = 0):
+def stream_events(request: Request, project_id: str | None = None, after_id: int = 0):
+    # An omitted project_id streams every project. That cross-project read is
+    # admin-only even when CAIRN_ADMIN_TOKEN is unset. A project-scoped stream
+    # follows /projects/{id}/events: open for local dev, bearer required once
+    # the token is configured (enforced by AdminTokenMiddleware on /events).
+    if not project_id:
+        require_admin(request)
     return StreamingResponse(
         _event_stream(project_id, after_id),
         media_type="text/event-stream",
