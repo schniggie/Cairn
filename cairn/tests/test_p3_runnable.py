@@ -28,8 +28,9 @@ from conftest import FakeClient, FakeContainerManager, FakeDriver, FakeLease, ma
 def client(tmp_path, monkeypatch):
     db_path = tmp_path / "test.db"
     monkeypatch.setattr(db, "_db_path", None)
+    monkeypatch.setattr("cairn.server.app.ADMIN_TOKEN", "test-admin")
     db.configure(db_path)
-    with TestClient(app) as c:
+    with TestClient(app, headers={"Authorization": "Bearer test-admin"}) as c:
         yield c
 
 
@@ -69,7 +70,8 @@ def test_resolve_codebase_missing_path_errors(tmp_path):
     assert err and "does not exist" in err
 
 
-def test_ensure_static_container_passes_codebase_bind(tmp_path):
+def test_ensure_static_container_passes_codebase_bind(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAIRN_PROJECT_SOURCE_ROOT", str(tmp_path))
     code = tmp_path / "src"
     code.mkdir()
     origin = json.dumps(
@@ -89,10 +91,11 @@ def test_ensure_static_container_passes_codebase_bind(tmp_path):
     assert containers.ensure_calls
     call = containers.ensure_calls[0]
     assert call["profile"] == "static"
-    assert call["codebase_host_path"] == str(code)
+    assert Path(call["codebase_host_path"]) == code.resolve()
 
 
 def test_explore_ensure_running_receives_codebase_bind(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAIRN_PROJECT_SOURCE_ROOT", str(tmp_path))
     code = tmp_path / "app"
     code.mkdir()
     origin = json.dumps({"codebase": {"path": str(code)}, "target": {}, "allowlist": []})
@@ -141,7 +144,7 @@ def test_explore_ensure_running_receives_codebase_bind(monkeypatch, tmp_path):
     )
     assert outcome == "success"
     assert containers.ensure_calls
-    assert containers.ensure_calls[0].get("codebase_host_path") == str(code)
+    assert Path(containers.ensure_calls[0].get("codebase_host_path")) == code.resolve()
 
 
 def test_bootstrap_fails_clearly_when_codebase_missing(monkeypatch, tmp_path):
@@ -243,6 +246,7 @@ def test_initial_payload_uses_draft_not_prose():
 
 
 def test_verify_task_fires_payload_draft_to_demo(client: TestClient, demo_server, tmp_path, monkeypatch):
+    monkeypatch.setenv("CAIRN_PROJECT_SOURCE_ROOT", str(tmp_path))
     hostport = demo_server.replace("http://", "")
     code = tmp_path / "code"
     code.mkdir()
@@ -386,7 +390,10 @@ def test_verify_task_fires_payload_draft_to_demo(client: TestClient, demo_server
     )
     assert outcome == "success"
     # verify container got codebase bind
-    assert any(c.get("profile") == "verify" and c.get("codebase_host_path") == str(code) for c in containers.ensure_calls)
+    assert any(
+        c.get("profile") == "verify" and c.get("codebase_host_path") and Path(c["codebase_host_path"]) == code.resolve()
+        for c in containers.ensure_calls
+    )
 
     detail2 = client.get(f"/projects/{pid}").json()
     sink = next(f for f in detail2["facts"] if f["id"] == facts["sink"]["id"])

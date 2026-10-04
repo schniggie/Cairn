@@ -7,6 +7,7 @@ from pathlib import Path
 
 from cairn.dispatcher.config import AuthConfig, LocalConfig
 from cairn.dispatcher.runtime.local_process import LocalProcess
+from cairn.server.research_sandbox import HostMountError, resolve_approved_host_mount
 
 LOG = logging.getLogger(__name__)
 
@@ -83,10 +84,10 @@ class LocalBackend:
     def _link_project_root(project_dir: Path, project_root: str | None) -> None:
         if not project_root:
             return
-        target = Path(project_root).expanduser().resolve()
-        if not target.is_dir():
-            LOG.warning("project_root is not a directory: %s", target)
-            return
+        try:
+            target = resolve_approved_host_mount(project_root)
+        except HostMountError as exc:
+            raise RuntimeError(str(exc)) from exc
         link = project_dir / "project"
         if link.is_symlink() and link.resolve() == target:
             return

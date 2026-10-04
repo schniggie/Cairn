@@ -23,6 +23,9 @@ LOG = logging.getLogger(__name__)
 # no repository mount is allowed. A caller-supplied confirmation flag is not a
 # substitute for this root.
 SOURCE_ROOT_ENV = "CAIRN_RESEARCH_SOURCE_ROOT"
+# Docker/local project mounts. Unset falls back to the research root so one
+# operator allowlist covers both. Unset with no fallback refuses every host mount.
+PROJECT_SOURCE_ROOT_ENV = "CAIRN_PROJECT_SOURCE_ROOT"
 
 # These directories are never a repository mount, including when a source root
 # is configured too wide. A source root may live *under* an operator home
@@ -68,6 +71,10 @@ _DENIED_PREFIXES = (
 
 class RepoPathError(ValueError):
     """The requested repository is not an approved mount source."""
+
+
+class HostMountError(ValueError):
+    """A project host path is not an approved Docker or local mount source."""
 
 
 def _denied_reason(resolved: Path) -> str | None:
@@ -124,6 +131,55 @@ def resolve_approved_repo(repo: str) -> Path:
         raise RepoPathError("未配置 CAIRN_RESEARCH_SOURCE_ROOT，拒绝挂载代码目录")
     if not any(resolved == root or resolved.is_relative_to(root) for root in approved):
         raise RepoPathError("代码目录不在已批准的研究代码根内")
+    return resolved
+
+
+def configured_project_source_roots() -> list[Path]:
+    """Absolute roots from ``CAIRN_PROJECT_SOURCE_ROOT``, else the research root."""
+    raw = os.environ.get(PROJECT_SOURCE_ROOT_ENV, "").strip()
+    if not raw:
+        raw = os.environ.get(SOURCE_ROOT_ENV, "")
+    roots: list[Path] = []
+    for part in raw.split(os.pathsep):
+        part = part.strip()
+        if part:
+            roots.append(Path(part))
+    return roots
+
+
+def resolve_approved_host_mount(raw: str) -> Path:
+    """Resolve a project host path only when it stays inside an approved root.
+
+    Filesystem root, the operator home, and sensitive system directories are
+    rejected even if a source root is configured too wide. Symlinks are rejected
+    so a link cannot retarget the mount. No caller-supplied flag is consulted.
+    """
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise HostMountError("host mount path must be absolute")
+    if path.is_symlink():
+        raise HostMountError("host mount path must not be a symlink")
+    if not path.is_dir():
+        raise HostMountError("host mount path is not a directory")
+    resolved = path.resolve()
+    reason = _denied_reason(resolved)
+    if reason:
+        raise HostMountError(f"refusing to mount sensitive directory: {reason}")
+    approved: list[Path] = []
+    for root in configured_project_source_roots():
+        if not root.is_absolute():
+            raise HostMountError("project source root must be absolute")
+        if root.is_symlink():
+            raise HostMountError("project source root must not be a symlink")
+        root_resolved = root.resolve()
+        root_reason = _denied_reason(root_resolved)
+        if root_reason:
+            raise HostMountError(f"project source root is a sensitive directory: {root_reason}")
+        approved.append(root_resolved)
+    if not approved:
+        raise HostMountError("CAIRN_PROJECT_SOURCE_ROOT is not configured; refusing host mounts")
+    if not any(resolved == root or resolved.is_relative_to(root) for root in approved):
+        raise HostMountError("host mount path is outside the approved project source root")
     return resolved
 
 # System read-only bind roots the model needs to run the CLI (its dynamic loader,

@@ -19,6 +19,7 @@ from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
 from cairn.dispatcher.runtime.process import ProcessResult
 from cairn.dispatcher.workers.base import DriverResult
 from cairn.server.models import AuditEvent, AuditEventCreate
+from cairn.server.research_sandbox import HostMountError, resolve_approved_host_mount
 
 PROCESS_COMMUNICATE_GRACE_SECONDS = 15
 LOG_PREVIEW_LIMIT = 1200
@@ -196,7 +197,11 @@ def resolve_codebase_host_path(project, *, require_readable: bool = True) -> tup
         return None, f"codebase path does not exist: {host_path}"
     if not os.access(path, os.R_OK):
         return None, f"codebase path is not readable: {host_path}"
-    return str(path), None
+    try:
+        approved = resolve_approved_host_mount(str(path))
+    except HostMountError as exc:
+        return None, str(exc)
+    return str(approved), None
 
 
 def ensure_static_container(config: DispatchConfig, container_manager: object, project) -> tuple[str | None, str | None]:

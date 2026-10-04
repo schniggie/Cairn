@@ -23,6 +23,7 @@ from cairn.server.models import (
 )
 from cairn.server.services import (
     build_intents,
+    codebase_path_from_origin,
     check_project_completed,
     check_project_active,
     clear_project_reason,
@@ -86,9 +87,10 @@ def list_projects():
 
 @router.post("/projects", response_model=ProjectDetail, status_code=201)
 def create_project(body: CreateProjectRequest, request: Request):
-    # Selecting the host backend or seeding files is a privileged side effect.
-    # A normal project create (title, origin, goal) stays available for local dev.
-    if body.backend is not None or body.init_files:
+    # Host mounts, the local backend, and seeded files are privileged side effects.
+    # A normal project create (title, origin text, goal) stays available for local dev.
+    host_mount = bool((body.project_root or "").strip()) or codebase_path_from_origin(body.origin) is not None
+    if body.backend is not None or body.init_files or host_mount:
         require_admin(request)
     with get_conn() as conn:
         pid = next_project_id(conn)

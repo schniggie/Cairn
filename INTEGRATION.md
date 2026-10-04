@@ -79,7 +79,7 @@ Ten commits were squashed into one after a clean apply onto current main. The on
 
 ## 9. Nicholas1126/Cairn
 
-**Partial.** OpenCode worker (`opencode run`, container mode uses `OPENCODE_CONFIG_CONTENT` when the model env is set). Skills store at `~/.cairn/skills` with zip upload as a raw body (no python-multipart). Per-project `backend` selects the existing `LocalBackend` or `ContainerManager`. `project_root` is linked or bind-mounted read-only. Bootstrap, explore, and reason prompts accept `{skills}` and `{project_knowledge}`.
+**Partial.** OpenCode worker (`opencode run`, container mode uses `OPENCODE_CONFIG_CONTENT` when the model env is set). Skills store at `~/.cairn/skills` with zip upload as a raw body (no python-multipart). Per-project `backend` selects the existing `LocalBackend` or `ContainerManager`. `project_root` and `origin.codebase.path` are host mounts: creating a project with either requires the admin bearer, and both backends refuse the mount unless the path is a real non-symlink directory inside `CAIRN_PROJECT_SOURCE_ROOT` (falling back to `CAIRN_RESEARCH_SOURCE_ROOT`). `/`, the home directory, and sensitive system directories are rejected even if the root is too wide. Bootstrap, explore, and reason prompts accept `{skills}` and `{project_knowledge}`.
 
 **Skipped.** Vendored FlockOS / `flock`. Replacing `runtime/local` and `LocalProcess`. Chat, executions, and `index.html`. Host binary path overrides live in `~/.cairn/engines.json` and do not add a second scheduler.
 

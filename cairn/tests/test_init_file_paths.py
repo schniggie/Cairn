@@ -54,6 +54,20 @@ def test_unauthenticated_project_create_cannot_select_local_or_seed_files(tmp_pa
     with TestClient(app) as client:
         plain = client.post("/projects", json={"title": "t", "origin": "o", "goal": "g"})
         assert plain.status_code == 201
+        rooted = client.post(
+            "/projects",
+            json={"title": "t", "origin": "o", "goal": "g", "project_root": "/etc"},
+        )
+        assert rooted.status_code == 403
+        codebase = client.post(
+            "/projects",
+            json={
+                "title": "t",
+                "origin": '{"codebase": {"path": "/etc"}}',
+                "goal": "g",
+            },
+        )
+        assert codebase.status_code == 403
         local = client.post(
             "/projects",
             json={"title": "t", "origin": "o", "goal": "g", "backend": "local"},

@@ -13,8 +13,32 @@ from docker.models.containers import Container
 
 from cairn.dispatcher.config import AuthConfig, ContainerConfig
 from cairn.dispatcher.runtime.process import ManagedProcess
+from cairn.server.research_sandbox import HostMountError, resolve_approved_host_mount
 
 LOG = logging.getLogger(__name__)
+
+
+def host_bind_volumes(project_root: str | None, codebase_host_path: str | None) -> dict[str, dict[str, str]]:
+    """Build read-only bind mounts only for approved host directories.
+
+    Raises ``RuntimeError`` when a requested path is outside the operator source
+    root, is a symlink, or is a sensitive system directory. Callers must not
+    start the container with the requested mount omitted.
+    """
+    volumes: dict[str, dict[str, str]] = {}
+    mounts = (
+        (project_root, "/workspace/project", "project_root"),
+        (codebase_host_path, "/codebase", "codebase path"),
+    )
+    for raw, bind, label in mounts:
+        if not raw:
+            continue
+        try:
+            source = str(resolve_approved_host_mount(raw))
+        except HostMountError as exc:
+            raise RuntimeError(f"{label}: {exc}") from exc
+        volumes[source] = {"bind": bind, "mode": "ro"}
+    return volumes
 
 
 class ContainerManager:
@@ -87,19 +111,7 @@ class ContainerManager:
             self._start_existing(name)
             return name
         LOG.info("creating container project=%s container=%s image=%s", project_id, name, self._config.image)
-        volumes = {}
-        if project_root:
-            root = Path(project_root).expanduser().resolve()
-            if root.is_dir():
-                volumes[str(root)] = {"bind": "/workspace/project", "mode": "ro"}
-            else:
-                LOG.warning("project_root is not a directory: %s", root)
-        if codebase_host_path:
-            codebase = Path(codebase_host_path).expanduser().resolve()
-            if codebase.is_dir():
-                volumes[str(codebase)] = {"bind": "/codebase", "mode": "ro"}
-            else:
-                LOG.warning("codebase path is not a directory: %s", codebase)
+        volumes = host_bind_volumes(project_root, codebase_host_path)
         volumes.update(self._auth_volumes(project_id))
         try:
             self._client.containers.run(

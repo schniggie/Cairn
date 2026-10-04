@@ -20,8 +20,9 @@ from cairn.server.app import app
 def client(tmp_path, monkeypatch):
     db_path = tmp_path / "test.db"
     monkeypatch.setattr(db, "_db_path", None)
+    monkeypatch.setattr("cairn.server.app.ADMIN_TOKEN", "test-admin")
     db.configure(db_path)
-    with TestClient(app) as c:
+    with TestClient(app, headers={"Authorization": "Bearer test-admin"}) as c:
         yield c
 
 

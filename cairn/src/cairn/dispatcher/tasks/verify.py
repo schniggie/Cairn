@@ -82,6 +82,15 @@ def run_verify_task(
                 )
 
         codebase_path = _origin_codebase_path(origin_desc)
+        if codebase_path:
+            from cairn.server.research_sandbox import HostMountError, resolve_approved_host_mount
+
+            try:
+                codebase_path = str(resolve_approved_host_mount(codebase_path))
+            except HostMountError as exc:
+                LOG.error("verify codebase mount rejected project=%s error=%s", project.project.id, exc)
+                best_effort_release(client, project.project.id, intent.id, worker.name)
+                return "failed"
         creds_env = resolve_credentials_ref(_origin_credentials_ref(origin_desc))
         # verify profile: short-lived, credentials only here, codebase RO
         verify_container = container_manager.ensure_running(
