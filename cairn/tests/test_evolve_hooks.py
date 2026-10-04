@@ -98,6 +98,33 @@ def test_admin_token_guards_project_reads_and_allows_worker_writes(monkeypatch) 
         assert test_client.post("/projects/p001/fail").status_code == 200
 
 
+def test_admin_token_guards_ctf_and_research(monkeypatch) -> None:
+    monkeypatch.setattr(app_module, "ADMIN_TOKEN", "secret")
+    guarded = FastAPI()
+
+    @guarded.get("/ctf/config")
+    def ctf_config():
+        return PlainTextResponse("cfg")
+
+    @guarded.get("/api/research/sessions")
+    def research_sessions():
+        return PlainTextResponse("sessions")
+
+    @guarded.get("/research")
+    def research_page():
+        return PlainTextResponse("page")
+
+    guarded.add_middleware(AdminTokenMiddleware)
+    with TestClient(guarded) as test_client:
+        assert test_client.get("/ctf/config").status_code == 403
+        assert test_client.get("/api/research/sessions").status_code == 403
+        assert test_client.get("/research").status_code == 403
+        headers = {"Authorization": "Bearer secret"}
+        assert test_client.get("/ctf/config", headers=headers).status_code == 200
+        assert test_client.get("/api/research/sessions", headers=headers).status_code == 200
+        assert test_client.get("/research", headers=headers).status_code == 200
+
+
 def test_claude_and_codex_extract_tool_trajectories() -> None:
     claude_log = "\n".join(
         [

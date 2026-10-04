@@ -19,6 +19,113 @@ from pathlib import Path
 
 LOG = logging.getLogger(__name__)
 
+# Operator-approved trees the research worker may bind read-only. Unset means
+# no repository mount is allowed. A caller-supplied confirmation flag is not a
+# substitute for this root.
+SOURCE_ROOT_ENV = "CAIRN_RESEARCH_SOURCE_ROOT"
+
+# These directories are never a repository mount, including when a source root
+# is configured too wide. A source root may live *under* an operator home
+# (for example /home/kali/src) but cannot be the home directory itself.
+_DENIED_EXACT = frozenset(
+    {
+        "/",
+        "/bin",
+        "/boot",
+        "/dev",
+        "/etc",
+        "/home",
+        "/lib",
+        "/lib64",
+        "/opt",
+        "/proc",
+        "/root",
+        "/run",
+        "/sbin",
+        "/sys",
+        "/tmp",
+        "/usr",
+        "/var",
+    }
+)
+# Children of these prefixes are sensitive even when a parent source root
+# would otherwise contain them.
+_DENIED_PREFIXES = (
+    "/bin",
+    "/boot",
+    "/dev",
+    "/etc",
+    "/lib",
+    "/lib64",
+    "/proc",
+    "/root",
+    "/run",
+    "/sbin",
+    "/sys",
+    "/usr",
+)
+
+
+class RepoPathError(ValueError):
+    """The requested repository is not an approved mount source."""
+
+
+def _denied_reason(resolved: Path) -> str | None:
+    text = resolved.as_posix()
+    if text in _DENIED_EXACT:
+        return "filesystem root" if text == "/" else text
+    home = Path.home().resolve()
+    if resolved == home:
+        return "home directory"
+    for prefix in _DENIED_PREFIXES:
+        if text.startswith(prefix + "/"):
+            return prefix
+    return None
+
+
+def configured_source_roots() -> list[Path]:
+    """Absolute source roots from ``CAIRN_RESEARCH_SOURCE_ROOT`` (``os.pathsep``)."""
+    raw = os.environ.get(SOURCE_ROOT_ENV, "")
+    roots: list[Path] = []
+    for part in raw.split(os.pathsep):
+        part = part.strip()
+        if part:
+            roots.append(Path(part))
+    return roots
+
+
+def resolve_approved_repo(repo: str) -> Path:
+    """Resolve ``repo`` only when it is a real directory inside a source root.
+
+    Filesystem root, home, and system directories are rejected on their own.
+    The check does not consult any caller-supplied authorization flag.
+    """
+    path = Path(repo)
+    if not path.is_absolute():
+        raise RepoPathError("代码目录必须是绝对路径")
+    if path.is_symlink():
+        raise RepoPathError("代码目录禁止为符号链接")
+    if not path.is_dir():
+        raise RepoPathError("代码目录不存在或不是目录")
+    resolved = path.resolve()
+    reason = _denied_reason(resolved)
+    if reason:
+        raise RepoPathError(f"拒绝挂载敏感目录：{reason}")
+    approved: list[Path] = []
+    for root in configured_source_roots():
+        if not root.is_absolute():
+            raise RepoPathError("研究代码根必须是绝对路径")
+        root_resolved = root.resolve()
+        root_reason = _denied_reason(root_resolved)
+        if root_reason:
+            raise RepoPathError(f"研究代码根不允许指向敏感目录：{root_reason}")
+        approved.append(root_resolved)
+    if not approved:
+        raise RepoPathError("未配置 CAIRN_RESEARCH_SOURCE_ROOT，拒绝挂载代码目录")
+    if not any(resolved == root or resolved.is_relative_to(root) for root in approved):
+        raise RepoPathError("代码目录不在已批准的研究代码根内")
+    return resolved
+
 # System read-only bind roots the model needs to run the CLI (its dynamic loader,
 # libs, config). We never bind /home, /root, /run, or host /tmp; those namespaces
 # stay private so the operator's files are out of reach.
@@ -170,6 +277,12 @@ def build_sandbox(
     execution. A separate writable cache/tmp area lives inside the workspace. Raises
     if bwrap is unavailable, the workspace is unusable, or required config is missing.
     """
+    repo_path: Path | None = None
+    if repo:
+        try:
+            repo_path = resolve_approved_repo(repo)
+        except RepoPathError as exc:
+            raise RuntimeError(str(exc)) from exc
     if shutil.which("bwrap") is None:
         raise RuntimeError(
             "研究执行需要 bubblewrap 隔离；请安装 bwrap（sudo apt install bubblewrap）后重试"
@@ -197,13 +310,7 @@ def build_sandbox(
     command += ["--proc", "/proc", "--dev", "/dev"]
     command += ["--tmpfs", "/tmp"]
     command += ["--bind", str(workspace), "/workspace"]
-    if repo:
-        repo_path = Path(repo)
-        if not repo_path.is_dir():
-            raise RuntimeError(f"授权代码目录不存在或不是目录：{repo}")
-        repo_path = repo_path.resolve()
-        if repo_path.is_symlink():
-            raise RuntimeError(f"授权代码目录禁止为符号链接：{repo}")
+    if repo_path is not None:
         command += ["--ro-bind", str(repo_path), "/repo"]
 
     # Make the CLI binary and its resolved target reachable (a symlinked launcher).

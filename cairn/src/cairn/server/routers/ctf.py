@@ -8,10 +8,11 @@ can probe connectivity and submit a flag without the bridge running.
 
 from __future__ import annotations
 
+import secrets
 import time
 
 import requests
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from cairn.ctfbridge.adapters import get_adapter
 from cairn.server import ctf_service
@@ -29,6 +30,20 @@ from cairn.server.models import (
 router = APIRouter(prefix="/ctf", tags=["ctf"])
 
 
+def _require_admin(request: Request) -> None:
+    """Fail closed unless the caller presents the configured admin token.
+
+    The UI config route never returns raw secrets. This check is the only
+    way to read them, and it refuses when ``CAIRN_ADMIN_TOKEN`` is unset.
+    """
+    from cairn.server import app as server_app
+
+    expected = server_app.ADMIN_TOKEN.strip()
+    presented = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    if not expected or len(presented) != len(expected) or not secrets.compare_digest(presented, expected):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
 def _adapter_from_config() -> tuple[str, dict, object]:
     with get_conn() as conn:
         cfg = ctf_service.load_config(conn, full=True)
@@ -44,9 +59,18 @@ def _adapter_from_config() -> tuple[str, dict, object]:
 
 
 @router.get("/config", response_model=CtfConfig)
-def get_config(full: bool = False):
+def get_config():
+    """UI-facing config. Secrets stay masked; ``full`` is not accepted here."""
     with get_conn() as conn:
-        return ctf_service.load_config(conn, full=full)
+        return ctf_service.load_config(conn, full=False)
+
+
+@router.get("/internal/config", response_model=CtfConfig)
+def get_internal_config(request: Request):
+    """Service path for the bridge. Returns stored secrets only to an admin token."""
+    _require_admin(request)
+    with get_conn() as conn:
+        return ctf_service.load_config(conn, full=True)
 
 
 @router.put("/config", response_model=CtfConfig)

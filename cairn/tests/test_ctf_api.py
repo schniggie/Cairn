@@ -48,7 +48,7 @@ def test_config_defaults_and_masking(client: TestClient) -> None:
     assert body["model_api_key"] == ""
 
 
-def test_config_put_and_token_masking(client: TestClient) -> None:
+def test_config_put_and_token_masking(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     response = client.put(
         "/ctf/config",
         json={"base_url": "https://ctf.example", "token": "sekrit", "max_concurrent": 3},
@@ -60,13 +60,22 @@ def test_config_put_and_token_masking(client: TestClient) -> None:
 
     # masked token echoed back on save must not overwrite the real token
     client.put("/ctf/config", json={"token": "***", "team_name": "team-a"})
-    full = client.get("/ctf/config?full=true").json()
+    public = client.get("/ctf/config?full=true").json()
+    assert public["token"] == "***"
+    assert public["team_name"] == "team-a"
+    assert client.get("/ctf/internal/config").status_code == 403
+
+    monkeypatch.setattr("cairn.server.app.ADMIN_TOKEN", "admin-secret")
+    assert client.get("/ctf/internal/config", headers={"Authorization": "Bearer nope"}).status_code == 403
+    full = client.get("/ctf/internal/config", headers={"Authorization": "Bearer admin-secret"}).json()
     assert full["token"] == "sekrit"
     assert full["team_name"] == "team-a"
+    assert client.get("/ctf/config").json()["token"] == "***"
 
     # explicit empty token clears it
     client.put("/ctf/config", json={"token": ""})
     assert client.get("/ctf/config?full=true").json()["token"] == ""
+    assert client.get("/ctf/internal/config", headers={"Authorization": "Bearer admin-secret"}).json()["token"] == ""
 
 
 def test_config_rejects_invalid_flag_regex(client: TestClient) -> None:
@@ -148,7 +157,7 @@ def test_sync_and_heartbeat(client: TestClient) -> None:
     assert config["last_sync_at"] == "2026-01-01T00:00:00Z"
 
     client.post("/ctf/heartbeat", json={"error": "boom"})
-    config = client.get("/ctf/config?full=true").json()
+    config = client.get("/ctf/config").json()
     assert config["bridge_error"] == "boom"
     assert config["bridge_heartbeat_at"] is not None
 
@@ -173,7 +182,7 @@ def test_connection_probe_with_mock_adapter(client: TestClient) -> None:
 # --------------------------------------------------------- new config fields
 
 
-def test_config_extra_fields_and_model_secret_masking(client: TestClient) -> None:
+def test_config_extra_fields_and_model_secret_masking(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     response = client.put(
         "/ctf/config",
         json={
@@ -196,12 +205,20 @@ def test_config_extra_fields_and_model_secret_masking(client: TestClient) -> Non
     assert body["model_name"] == "deepseek-v4-pro-0813"
     assert body["model_api_key"] == "***"
 
-    full = client.get("/ctf/config?full=true").json()
+    assert client.get("/ctf/config?full=true").json()["model_api_key"] == "***"
+    assert client.get("/ctf/internal/config").status_code == 403
+
+    monkeypatch.setattr("cairn.server.app.ADMIN_TOKEN", "admin-secret")
+    full = client.get("/ctf/internal/config", headers={"Authorization": "Bearer admin-secret"}).json()
     assert full["model_api_key"] == "sk-sekrit-model"
 
     # masked model key echoed back must not clobber the real one
     client.put("/ctf/config", json={"model_api_key": "***"})
-    assert client.get("/ctf/config?full=true").json()["model_api_key"] == "sk-sekrit-model"
+    assert client.get("/ctf/config").json()["model_api_key"] == "***"
+    assert (
+        client.get("/ctf/internal/config", headers={"Authorization": "Bearer admin-secret"}).json()["model_api_key"]
+        == "sk-sekrit-model"
+    )
 
 
 def test_heartbeat_reports_model_health(client: TestClient) -> None:

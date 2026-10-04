@@ -14,6 +14,7 @@ from cairn.server.routers.projects import router as projects_router
 @pytest.fixture
 def client(tmp_path,monkeypatch):
     monkeypatch.setattr(db,'_db_path',None)
+    monkeypatch.setenv('CAIRN_RESEARCH_SOURCE_ROOT',str(tmp_path))
     db.configure(tmp_path/'research.db')
     app=FastAPI()
     app.include_router(router)

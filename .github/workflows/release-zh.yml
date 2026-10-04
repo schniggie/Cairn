@@ -11,6 +11,10 @@ name: Build And Release Chinese Edition (zh)
 #   - Cairn-<版本>-zh.zip     完整中文版整包
 #
 # 版本解析约定：tag 形如 v<版本>-zh；Release tag = v<版本>-zh。
+#
+# 权限：checkout 与打包只读。contents: write 与 GH_TOKEN 只出现在 publish job，
+# 且该 job 跑在名为 release 的环境中。请在仓库 Settings → Environments 里为
+# release 配置 required reviewers（或其它保护规则）；GitHub 不会自动加上。
 
 on:
   workflow_dispatch:
@@ -23,16 +27,21 @@ on:
       - "v*-zh"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      delta: ${{ steps.delta.outputs.file }}
+      full: ${{ steps.full.outputs.file }}
+      notes: ${{ steps.notes.outputs.file }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Resolve version
         id: ver
@@ -84,14 +93,47 @@ jobs:
           ls -la "${FULL}"
           echo "file=${FULL}" >> "${GITHUB_OUTPUT}"
 
-      - name: Create or update release
+      - name: Render release notes
+        id: notes
         run: |
           set -euo pipefail
           V="${{ steps.ver.outputs.version }}"
+          NOTES="release-notes-${V}.md"
+          sed "s/{{VERSION}}/${V}/g" packaging/zh-CN/release-notes.md > "${NOTES}"
+          echo "file=${NOTES}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload release files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zh-release
+          if-no-files-found: error
+          path: |
+            ${{ steps.delta.outputs.file }}
+            ${{ steps.full.outputs.file }}
+            ${{ steps.notes.outputs.file }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Download release files
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: zh-release
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          V="${{ needs.build.outputs.version }}"
           TAG="v${V}-zh"
-          DELTA="${{ steps.delta.outputs.file }}"
-          FULL="${{ steps.full.outputs.file }}"
-          sed "s/{{VERSION}}/${V}/g" packaging/zh-CN/release-notes.md > /tmp/release-notes.md
+          DELTA="${{ needs.build.outputs.delta }}"
+          FULL="${{ needs.build.outputs.full }}"
+          NOTES="${{ needs.build.outputs.notes }}"
 
           if gh release view "${TAG}" >/dev/null 2>&1; then
             echo "[*] release ${TAG} 已存在，覆盖上传资产并更新说明"
@@ -99,18 +141,20 @@ jobs:
               --clobber --repo "${GITHUB_REPOSITORY}"
             gh release edit "${TAG}" \
               --repo "${GITHUB_REPOSITORY}" \
-              --notes-file /tmp/release-notes.md
+              --notes-file "${NOTES}"
           else
             echo "[*] 创建 release ${TAG}"
             gh release create "${TAG}" "${DELTA}" "${FULL}" \
               --repo "${GITHUB_REPOSITORY}" \
               --title "Cairn 中文版 ${V} (zh)" \
-              --notes-file /tmp/release-notes.md
+              --notes-file "${NOTES}"
           fi
 
       - name: Verify release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          V="${{ steps.ver.outputs.version }}"
+          V="${{ needs.build.outputs.version }}"
           TAG="v${V}-zh"
           gh release view "${TAG}" \
             --repo "${GITHUB_REPOSITORY}" \

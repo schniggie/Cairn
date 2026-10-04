@@ -17,14 +17,14 @@ class _TestClientSession:
     def __init__(self, client: TestClient) -> None:
         self.client = client
 
-    def request(self, method, url, params=None, json=None, timeout=None):
+    def request(self, method, url, params=None, json=None, timeout=None, headers=None):
         parsed = urlparse(url)
         merged = parse_qs(parsed.query)
         for key, value in (params or {}).items():
             merged[key] = [str(value)]
         query = urlencode(merged, doseq=True)
         path = f"{parsed.path}?{query}" if query else parsed.path
-        return self.client.request(method, path, json=json)
+        return self.client.request(method, path, json=json, headers=headers)
 
 
 @pytest.fixture

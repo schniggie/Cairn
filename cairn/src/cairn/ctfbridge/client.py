@@ -6,6 +6,7 @@ Only the endpoints the bridge needs are wrapped here. All methods raise
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import requests
@@ -23,12 +24,17 @@ class CairnApi:
 
     def _request(self, method: str, path: str, *, params: dict | None = None, body: dict | None = None) -> Any:
         url = f"{self.base}{path}"
+        headers = None
+        token = os.environ.get("CAIRN_ADMIN_TOKEN", "").strip()
+        if token:
+            headers = {"Authorization": f"Bearer {token}"}
         try:
             resp = self.session.request(
                 method,
                 url,
                 params=params,
                 json=body,
+                headers=headers,
                 timeout=self.timeout,
             )
         except requests.RequestException as exc:
@@ -48,7 +54,10 @@ class CairnApi:
     # ------------------------------------------------------------- CTF config
 
     def get_config(self, *, full: bool = False) -> dict:
-        return self._request("GET", "/ctf/config", params={"full": "true" if full else ""})
+        # Raw secrets are not on the UI route. ``full`` selects the admin path.
+        if full:
+            return self._request("GET", "/ctf/internal/config")
+        return self._request("GET", "/ctf/config")
 
     def set_mode(self, mode: str) -> dict:
         return self._request("PUT", "/ctf/mode", body={"mode": mode})

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -8,6 +7,7 @@ from fastapi.responses import Response
 
 from cairn.server.db import get_conn
 from cairn.server.research_models import CreateResearch, ResearchHint, ResearchMaterials, UpdateResearchBudget
+from cairn.server.research_sandbox import RepoPathError, resolve_approved_repo
 from cairn.server import research_services as service
 
 
@@ -36,11 +36,13 @@ router=APIRouter(prefix='/api/research/sessions',tags=['research'],dependencies=
 
 
 def validate_repo(repo):
-    # Filesystem validation happens before the write transaction. No repository scans.
+    # Mount policy is independent of authorization_confirmed. The directory must
+    # already exist inside CAIRN_RESEARCH_SOURCE_ROOT and must not be a system root.
     if repo:
-        path=Path(repo)
-        if not path.is_dir(): raise HTTPException(422,'代码目录在 Kali 上不存在或不是目录')
-        return str(path.resolve())
+        try:
+            return str(resolve_approved_repo(repo))
+        except RepoPathError as exc:
+            raise HTTPException(422, str(exc)) from exc
     return repo
 
 

@@ -22,6 +22,7 @@ from cairn.server.routers.projects import router as projects_router
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "_db_path", None)
+    monkeypatch.setenv("CAIRN_RESEARCH_SOURCE_ROOT", str(tmp_path))
     db.configure(tmp_path / "research.db")
     app = FastAPI()
     app.include_router(router)
@@ -195,6 +196,7 @@ def test_worker_code_audit_end_to_end(tmp_path, monkeypatch):
     real model gateway involved (deterministic, fixture-based). Code-only runs need no
     egress proxy, so no target HTTP is counted beyond the gate reservation."""
     monkeypatch.setattr(db, "_db_path", None)
+    monkeypatch.setenv("CAIRN_RESEARCH_SOURCE_ROOT", str(tmp_path))
     research_db = tmp_path / "research.db"
     db.configure(research_db)
     app = FastAPI()
@@ -308,6 +310,7 @@ def test_worker_combined_audit_maps_code_to_request(tmp_path, monkeypatch):
     t = threading.Thread(target=srv.serve_forever, daemon=True); t.start()
     try:
         monkeypatch.setattr(db, "_db_path", None)
+        monkeypatch.setenv("CAIRN_RESEARCH_SOURCE_ROOT", str(tmp_path))
         research_db = tmp_path / "research.db"
         db.configure(research_db)
         app = FastAPI()
@@ -1428,11 +1431,12 @@ def test_repo_fingerprint_changes_with_content(tmp_path):
     assert fingerprint_repo(str(r)) == f3
 
 
-def test_recheck_baseline_and_change_requeues(tmp_path):
+def test_recheck_baseline_and_change_requeues(tmp_path, monkeypatch):
     """M4 end-to-end: recheck stores a baseline; after the repo content changes it
     reports changed and re-queues a completed session for re-audit (new run batch,
     same history/budget), guarded so only completed sessions re-audit."""
     from cairn.server.routers import research as _rr
+    monkeypatch.setenv("CAIRN_RESEARCH_SOURCE_ROOT", str(tmp_path))
     repo = _make_repo(tmp_path)
     _prev = db._db_path
     db._db_path = None

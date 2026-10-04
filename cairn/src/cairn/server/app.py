@@ -57,7 +57,17 @@ _WORKER_WRITE_SUFFIXES = (
 class AdminTokenMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        protected = path.startswith("/projects") or path.startswith("/skills") or path.startswith("/engines")
+        # CTF holds platform tokens and model keys. Research accepts a host path
+        # that the worker bind-mounts. Both stay behind the same admin bearer as
+        # project, skill, and engine management.
+        protected = (
+            path.startswith("/projects")
+            or path.startswith("/skills")
+            or path.startswith("/engines")
+            or path.startswith("/ctf")
+            or path.startswith("/api/research")
+            or path.startswith("/research")
+        )
         if ADMIN_TOKEN and protected:
             if request.method == "POST" and path.startswith("/projects") and any(
                 path.endswith(suffix) for suffix in _WORKER_WRITE_SUFFIXES

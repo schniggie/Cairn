@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -86,5 +87,11 @@ class BridgeConfig:
 
 
 def load_bridge_config(api: CairnApi) -> BridgeConfig:
-    """Fetch and parse the current bridge configuration from the server."""
-    return BridgeConfig.from_server(api.get_config(full=True))
+    """Fetch and parse the current bridge configuration from the server.
+
+    Stored tokens are readable only when ``CAIRN_ADMIN_TOKEN`` is set. Without
+    it the internal route fails closed, and the masked public config is enough
+    for a bridge that has no platform secret to present.
+    """
+    full = bool(os.environ.get("CAIRN_ADMIN_TOKEN", "").strip())
+    return BridgeConfig.from_server(api.get_config(full=full))
