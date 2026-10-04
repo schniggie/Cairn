@@ -125,6 +125,30 @@ def test_admin_token_guards_ctf_and_research(monkeypatch) -> None:
         assert test_client.get("/research", headers=headers).status_code == 200
 
 
+def test_research_and_dispatch_config_fail_closed_without_token(monkeypatch) -> None:
+    monkeypatch.setattr(app_module, "ADMIN_TOKEN", "")
+    guarded = FastAPI()
+
+    @guarded.get("/projects")
+    def list_projects():
+        return PlainTextResponse("ok")
+
+    @guarded.get("/dispatch-config")
+    def dispatch_config():
+        return PlainTextResponse("cfg")
+
+    @guarded.get("/api/research/sessions")
+    def research_sessions():
+        return PlainTextResponse("sessions")
+
+    guarded.add_middleware(AdminTokenMiddleware)
+    with TestClient(guarded) as test_client:
+        assert test_client.get("/projects").status_code == 200
+        assert test_client.get("/dispatch-config").status_code == 403
+        assert test_client.get("/api/research/sessions").status_code == 403
+        assert test_client.get("/ctf/config").status_code == 404
+
+
 def test_claude_and_codex_extract_tool_trajectories() -> None:
     claude_log = "\n".join(
         [

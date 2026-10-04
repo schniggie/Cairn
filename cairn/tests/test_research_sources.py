@@ -15,6 +15,14 @@ from cairn.server.routers.research import router as research_router
 from cairn.server.routers.research_sources import router
 
 
+_AUTH = {'Authorization': 'Bearer test-admin'}
+
+
+@pytest.fixture(autouse=True)
+def _research_admin(monkeypatch):
+    monkeypatch.setattr('cairn.server.app.ADMIN_TOKEN', 'test-admin')
+
+
 @pytest.fixture
 def client(tmp_path,monkeypatch):
     monkeypatch.setattr(db,'_db_path',None)
@@ -23,7 +31,7 @@ def client(tmp_path,monkeypatch):
     app=FastAPI()
     app.include_router(research_router)
     app.include_router(router)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_AUTH) as client:
         yield client
 
 
@@ -287,6 +295,18 @@ def test_evidence_scope_status_and_empty_file(client,tmp_path):
     for status in ('running','pause_requested'):
         with db.get_conn() as conn: conn.execute('UPDATE research_sessions SET status=? WHERE id=?',(status,sid))
         assert client.post(endpoint(sid)+'/'+snapshot['id']+'/evidence',json=body).status_code==409
+
+
+def test_source_reads_fail_closed_without_admin_token(client,tmp_path,monkeypatch):
+    repo=make_repo(tmp_path)
+    sid=session(client,repo)
+    snapshot=capture(client,sid)
+    monkeypatch.setattr('cairn.server.app.ADMIN_TOKEN','')
+    anonymous=TestClient(client.app)
+    assert anonymous.get(endpoint(sid)).status_code==403
+    file_url=endpoint(sid)+'/'+snapshot['id']+'/file'
+    assert anonymous.get(file_url,params={'path':'app.py'}).status_code==403
+    assert 'first' not in anonymous.get(file_url,params={'path':'app.py'}).text
 
 
 def test_same_second_snapshot_order_is_creation_order(client,tmp_path,monkeypatch):

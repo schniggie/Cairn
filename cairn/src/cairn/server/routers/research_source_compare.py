@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
 from cairn.server import research_source_compare as service
+from cairn.server.admin_auth import require_admin
 
-router=APIRouter(prefix='/api/research/sessions',tags=['research-source-comparison'])
+router=APIRouter(prefix='/api/research/sessions',tags=['research-source-comparison'],dependencies=[Depends(require_admin)])
 
 
 @router.get('/{session_id}/source-comparison')

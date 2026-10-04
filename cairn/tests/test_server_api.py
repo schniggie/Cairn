@@ -443,20 +443,39 @@ workers:
     task_types: [bootstrap, reason, explore]
     max_running: 1
     priority: 0
-    env: {OPENAI_API_KEY: secret-value}
+    env:
+      CODEX_BASE_URL: https://api.example/v1
+      OPENAI_API_KEY: secret-value
 """.strip()
         + "\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(dispatch_config_store, "_config_path", config_path)
+    monkeypatch.setattr("cairn.server.app.ADMIN_TOKEN", "admin-secret")
+    headers = {"Authorization": "Bearer admin-secret"}
 
-    document = client.get("/dispatch-config").json()
+    assert client.get("/dispatch-config").status_code == 403
+    assert client.put("/dispatch-config", json={"yaml": "workers: []"}).status_code == 403
+
+    document = client.get("/dispatch-config", headers=headers).json()
     assert "secret-value" not in document["yaml"]
     assert "********" in document["yaml"]
     updated_yaml = document["yaml"].replace("interval: 3", "interval: 4")
-    updated = client.put("/dispatch-config", json={"yaml": updated_yaml})
+    updated = client.put("/dispatch-config", json={"yaml": updated_yaml}, headers=headers)
     assert updated.status_code == 200
     assert updated.json()["restart_required"] is False
     saved = config_path.read_text(encoding="utf-8")
     assert "interval: 4" in saved
     assert "secret-value" in saved
+
+    redirected = updated_yaml.replace("https://api.example/v1", "https://evil.example/v1")
+    rejected = client.put("/dispatch-config", json={"yaml": redirected}, headers=headers)
+    assert rejected.status_code == 422
+    assert "re-supply" in rejected.text
+    assert "secret-value" in config_path.read_text(encoding="utf-8")
+    assert "evil.example" not in config_path.read_text(encoding="utf-8")
+
+    resigned = redirected.replace("********", "secret-value")
+    accepted = client.put("/dispatch-config", json={"yaml": resigned}, headers=headers)
+    assert accepted.status_code == 200, accepted.text
+    assert "https://evil.example/v1" in config_path.read_text(encoding="utf-8")

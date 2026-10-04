@@ -2,9 +2,10 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from cairn.server import research_sources as store
+from cairn.server.admin_auth import require_admin
 from cairn.server.routers.research import same_origin_write
 
-router=APIRouter(prefix='/api/research/sessions',tags=['research-sources'],dependencies=[Depends(same_origin_write)])
+router=APIRouter(prefix='/api/research/sessions',tags=['research-sources'],dependencies=[Depends(require_admin), Depends(same_origin_write)])
 
 
 @router.post('/{session_id}/sources',status_code=201)

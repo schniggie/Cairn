@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from cairn import __version__
+from cairn.server.admin_auth import admin_token_matches, fails_closed
 from cairn.server import db
 from cairn.server.routers import (
     audit,
@@ -57,16 +58,19 @@ _WORKER_WRITE_SUFFIXES = (
 class AdminTokenMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        # CTF holds platform tokens and model keys. Research accepts a host path
-        # that the worker bind-mounts. Both stay behind the same admin bearer as
-        # project, skill, and engine management.
+        # Saved research content and dispatch config can redirect or reveal
+        # credentials. They refuse traffic when no admin token is configured.
+        # Project, skill, engine, and CTF management stay open in that local-dev
+        # case and require the bearer only after CAIRN_ADMIN_TOKEN is set.
+        if fails_closed(path):
+            if not admin_token_matches(request.headers.get("Authorization", "")):
+                return Response(status_code=403, content="Forbidden")
+            return await call_next(request)
         protected = (
             path.startswith("/projects")
             or path.startswith("/skills")
             or path.startswith("/engines")
             or path.startswith("/ctf")
-            or path.startswith("/api/research")
-            or path.startswith("/research")
         )
         if ADMIN_TOKEN and protected:
             if request.method == "POST" and path.startswith("/projects") and any(
@@ -92,8 +96,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-if ADMIN_TOKEN:
-    app.add_middleware(AdminTokenMiddleware)
+app.add_middleware(AdminTokenMiddleware)
 
 app.include_router(settings.router)
 app.include_router(projects.router)

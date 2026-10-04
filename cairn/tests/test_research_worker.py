@@ -19,6 +19,14 @@ from cairn.server.routers.research_runtime_status import router as runtime_route
 from cairn.server.routers.projects import router as projects_router
 
 
+_AUTH = {"Authorization": "Bearer test-admin"}
+
+
+@pytest.fixture(autouse=True)
+def _research_admin(monkeypatch):
+    monkeypatch.setattr("cairn.server.app.ADMIN_TOKEN", "test-admin")
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "_db_path", None)
@@ -28,7 +36,7 @@ def client(tmp_path, monkeypatch):
     app.include_router(router)
     app.include_router(runtime_router)
     app.include_router(projects_router)
-    with TestClient(app) as app_client:
+    with TestClient(app, headers=_AUTH) as app_client:
         yield app_client
 
 
@@ -108,7 +116,7 @@ def test_worker_end_to_end_with_outer_envelope(tmp_path, monkeypatch):
     app = FastAPI()
     app.include_router(router)
     app.include_router(projects_router)
-    with TestClient(app) as app_client:
+    with TestClient(app, headers=_AUTH) as app_client:
         session = create(app_client, title="Envelope e2e")
         sid = session["id"]
 
@@ -206,7 +214,7 @@ def test_worker_code_audit_end_to_end(tmp_path, monkeypatch):
     # entry endpoint + a permission gap an auditor would cite by file:line (line 4)
     (proj / "app.py").write_text("import os\n\n@route('/admin')\ndef admin_resource(req):\n    return fetch(req)\n", encoding="utf-8")
     (proj / "README.md").write_text("# demo audit target\n", encoding="utf-8")
-    with TestClient(app) as app_client:
+    with TestClient(app, headers=_AUTH) as app_client:
         session = create(app_client, url=None, repo=str(proj), title="Whitebox audit e2e",
                          objective="审计 admin_resource 的权限边界")
         sid = session["id"]
@@ -319,7 +327,7 @@ def test_worker_combined_audit_maps_code_to_request(tmp_path, monkeypatch):
         proj = tmp_path / "proj"; proj.mkdir()
         (proj / "main.py").write_text("import os\n\n@app_route(\"/data\")\ndef get_data(req):\n    return \"resource:\" + str(req.get('id'))\n", encoding="utf-8")
         target = f"http://127.0.0.1:{port}/"
-        with TestClient(app) as app_client:
+        with TestClient(app, headers=_AUTH) as app_client:
             session = create(app_client, url=target, repo=str(proj), title="Combined audit e2e",
                              objective="联动验证 get_data 的权限")
             sid = session["id"]
@@ -384,7 +392,7 @@ def test_budget_writes_back_true_cost_when_at_limit(tmp_path, monkeypatch):
     db.configure(research_db)
     app = FastAPI()
     app.include_router(router)
-    with TestClient(app) as app_client:
+    with TestClient(app, headers=_AUTH) as app_client:
         session = create(
             app_client,
             budget={"minutes": 45, "requests": 50, "max_cost_usd": 0.01, "max_steps": 10},
@@ -446,7 +454,7 @@ def test_pause_stops_live_subprocess(tmp_path, monkeypatch):
     db.configure(research_db)
     app = FastAPI()
     app.include_router(router)
-    with TestClient(app) as app_client:
+    with TestClient(app, headers=_AUTH) as app_client:
         session = create(app_client, title="Pause real subprocess")
         sid = session["id"]
         workspace_host = tmp_path / "ws" / sid
@@ -507,7 +515,7 @@ def test_lease_loss_stops_subprocess(tmp_path, monkeypatch):
     db.configure(research_db)
     app = FastAPI()
     app.include_router(router)
-    with TestClient(app) as app_client:
+    with TestClient(app, headers=_AUTH) as app_client:
         session = create(app_client, title="Lease loss stop")
         sid = session["id"]
         workspace_host = tmp_path / "ws" / sid
@@ -647,7 +655,7 @@ def test_no_start_when_request_budget_exhausted(tmp_path, monkeypatch):
     db.configure(research_db)
     app = FastAPI()
     app.include_router(router)
-    with TestClient(app) as app_client:
+    with TestClient(app, headers=_AUTH) as app_client:
         session = create(app_client, budget={"minutes": 45, "requests": 1, "max_cost_usd": 0.10, "max_steps": 10})
         sid = session["id"]
         with db.get_conn() as conn:
@@ -684,7 +692,7 @@ def test_cost_recorded_on_abnormal_exit(tmp_path, monkeypatch):
     db.configure(research_db)
     app = FastAPI()
     app.include_router(router)
-    with TestClient(app) as app_client:
+    with TestClient(app, headers=_AUTH) as app_client:
         session = create(app_client)
         sid = session["id"]
         # fake claude that exits nonzero but still emits a cost-bearing envelope
@@ -718,7 +726,7 @@ def test_stale_worker_cannot_write_results(tmp_path, monkeypatch):
     db.configure(research_db)
     app = FastAPI()
     app.include_router(router)
-    with TestClient(app) as app_client:
+    with TestClient(app, headers=_AUTH) as app_client:
         session = create(app_client)
         sid = session["id"]
         with db.get_conn() as conn:
@@ -748,7 +756,7 @@ def test_malformed_output_is_failed_not_completed(tmp_path, monkeypatch):
     db.configure(research_db)
     app = FastAPI()
     app.include_router(router)
-    with TestClient(app) as app_client:
+    with TestClient(app, headers=_AUTH) as app_client:
         session = create(app_client)
         sid = session["id"]
         fake_bin = tmp_path / "bin"; fake_bin.mkdir()
@@ -835,7 +843,7 @@ def test_claim_opens_independent_run_batch(tmp_path, monkeypatch):
     research_db = tmp_path / "research.db"
     db.configure(research_db)
     app = FastAPI(); app.include_router(router)
-    with TestClient(app) as app_client:
+    with TestClient(app, headers=_AUTH) as app_client:
         session = create(app_client)
         sid = session["id"]
         with db.get_conn() as conn:
@@ -855,7 +863,7 @@ def test_settle_is_idempotent_no_double_charge(tmp_path, monkeypatch):
     research_db = tmp_path / "research.db"
     db.configure(research_db)
     app = FastAPI(); app.include_router(router)
-    with TestClient(app) as app_client:
+    with TestClient(app, headers=_AUTH) as app_client:
         session = create(app_client)
         sid = session["id"]
         with db.get_conn() as conn:
@@ -874,7 +882,7 @@ def test_pending_cost_blocks_resume(tmp_path, monkeypatch):
     research_db = tmp_path / "research.db"
     db.configure(research_db)
     app = FastAPI(); app.include_router(router)
-    with TestClient(app) as app_client:
+    with TestClient(app, headers=_AUTH) as app_client:
         session = create(app_client)
         sid = session["id"]
         with db.get_conn() as conn:
@@ -908,7 +916,7 @@ def test_late_pause_preempts_completion(tmp_path, monkeypatch):
     research_db = tmp_path / "research.db"
     db.configure(research_db)
     app = FastAPI(); app.include_router(router)
-    with TestClient(app) as app_client:
+    with TestClient(app, headers=_AUTH) as app_client:
         session = create(app_client, title="pause preempt")
         sid = session["id"]
         payload = {"summary": "late result", "findings": [], "evidence": [],
@@ -933,7 +941,7 @@ def test_protocol_error_commits_nothing(tmp_path, monkeypatch):
     research_db = tmp_path / "research.db"
     db.configure(research_db)
     app = FastAPI(); app.include_router(router)
-    with TestClient(app) as app_client:
+    with TestClient(app, headers=_AUTH) as app_client:
         session = create(app_client)
         sid = session["id"]
         with db.get_conn() as conn:
@@ -957,7 +965,7 @@ def test_empty_results_valid_commit(tmp_path, monkeypatch):
     research_db = tmp_path / "research.db"
     db.configure(research_db)
     app = FastAPI(); app.include_router(router)
-    with TestClient(app) as app_client:
+    with TestClient(app, headers=_AUTH) as app_client:
         session = create(app_client)
         sid = session["id"]
         payload = {"summary": "target returned expected result; no vulnerability",
@@ -981,7 +989,7 @@ def test_old_worker_files_consumption_but_not_results(tmp_path, monkeypatch):
     research_db = tmp_path / "research.db"
     db.configure(research_db)
     app = FastAPI(); app.include_router(router)
-    with TestClient(app) as app_client:
+    with TestClient(app, headers=_AUTH) as app_client:
         session = create(app_client)
         sid = session["id"]
         with db.get_conn() as conn:
@@ -1070,7 +1078,7 @@ def test_old_batch_cannot_overwrite_new_results(tmp_path, monkeypatch):
     research_db = tmp_path / "research.db"
     db.configure(research_db)
     app = FastAPI(); app.include_router(router)
-    with TestClient(app) as app_client:
+    with TestClient(app, headers=_AUTH) as app_client:
         session = create(app_client, title="batch isolation")
         sid = session["id"]
         with db.get_conn() as conn:
@@ -1185,7 +1193,7 @@ def test_fail_session_bounded_recovery_cap(tmp_path):
     db.configure(tmp_path / "r.db")
     app = FastAPI(); app.include_router(router)
     try:
-        with TestClient(app) as cli:
+        with TestClient(app, headers=_AUTH) as cli:
             created = create(cli)   # fixture: posts a research session
         sid = created["id"]
         # First two recoverable failures -> requeued; cap is 2.
@@ -1232,7 +1240,7 @@ def test_worker_provider_error_requeues_bounded(tmp_path, monkeypatch):
     research_db = tmp_path / "research.db"
     db.configure(research_db)
     app = FastAPI(); app.include_router(router)
-    with TestClient(app) as app_client:
+    with TestClient(app, headers=_AUTH) as app_client:
         session = create(app_client); sid = session["id"]
     fake_bin = tmp_path / "bin"; fake_bin.mkdir()
     envelope = fake_bin / "envelope.json"
@@ -1270,7 +1278,7 @@ def test_settle_emits_budget_warning(tmp_path):
     db._db_path = None
     db.configure(tmp_path / "gw.db")
     app = FastAPI(); app.include_router(router)
-    with TestClient(app) as cli:
+    with TestClient(app, headers=_AUTH) as cli:
         created = create(cli); sid = created["id"]
     with db.get_conn() as conn:
         b = json.loads(conn.execute("SELECT budget_json FROM research_sessions WHERE id=?", (sid,)).fetchone()[0])
@@ -1299,7 +1307,7 @@ def test_budget_topup_resume_recovery_loop(tmp_path):
     db._db_path = None
     db.configure(tmp_path / "tp.db")
     app = FastAPI(); app.include_router(router)
-    with TestClient(app) as cli:
+    with TestClient(app, headers=_AUTH) as cli:
         created = create(cli); sid = created["id"]
         # Simulate a prior run that burned the whole approved budget.
         with db.get_conn() as conn:
@@ -1335,7 +1343,7 @@ def test_distill_experiences_from_confirmed_findings(tmp_path):
     db._db_path = None
     db.configure(tmp_path / "exp.db")
     app = FastAPI(); app.include_router(router)
-    with TestClient(app) as cli:
+    with TestClient(app, headers=_AUTH) as cli:
         a = create(cli); sid = a["id"]
     scope = service.session_scope({"repo": "/project/app"})
     with db.get_conn() as conn:
@@ -1371,7 +1379,7 @@ def test_experience_injected_into_same_scope_prompt(tmp_path, monkeypatch):
     research_db = tmp_path / "exp2.db"
     db.configure(research_db)
     app = FastAPI(); app.include_router(router)
-    with TestClient(app) as cli:
+    with TestClient(app, headers=_AUTH) as cli:
         s1 = create(cli); sid1 = s1["id"]
         s2 = create(cli); sid2 = s2["id"]
     # Seed an experience on scope repo:/a from "another" session (sid1 targets it).
@@ -1442,7 +1450,7 @@ def test_recheck_baseline_and_change_requeues(tmp_path, monkeypatch):
     db._db_path = None
     db.configure(tmp_path / "ch.db")
     app = FastAPI(); app.include_router(_rr.router)
-    with TestClient(app) as cli:
+    with TestClient(app, headers=_AUTH) as cli:
         created = create(cli, repo=repo, url=None); sid = created["id"]
         # First recheck: no baseline yet -> recorded, unchanged.
         r = cli.post(f"/api/research/sessions/{sid}/recheck")
@@ -1514,7 +1522,7 @@ def test_paused_step_autofinalizes_on_steps_cap(tmp_path, monkeypatch):
     research_db = tmp_path / "ac.db"
     db.configure(research_db)
     app = FastAPI(); app.include_router(_r)
-    with TestClient(app) as cli:
+    with TestClient(app, headers=_AUTH) as cli:
         sid = create(cli, budget={"minutes": 45, "requests": 50, "max_cost_usd": 1.0, "max_steps": 1})["id"]
     fake_bin = _make_nonterminal_claude(tmp_path)
     claude = fake_bin / "claude"
@@ -1541,7 +1549,7 @@ def test_paused_step_stays_paused_with_budget(tmp_path, monkeypatch):
     research_db = tmp_path / "ac2.db"
     db.configure(research_db)
     app = FastAPI(); app.include_router(router)
-    with TestClient(app) as cli:
+    with TestClient(app, headers=_AUTH) as cli:
         sid = create(cli, budget={"minutes": 45, "requests": 50, "max_cost_usd": 5.0, "max_steps": 10})["id"]
     fake_bin = _make_nonterminal_claude(tmp_path)
     claude = fake_bin / "claude"

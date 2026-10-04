@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 
+from cairn.server.admin_auth import require_admin
 from cairn.server.db import get_conn
 from cairn.server.research_models import CreateResearch, ResearchHint, ResearchMaterials, UpdateResearchBudget
 from cairn.server.research_sandbox import RepoPathError, resolve_approved_repo
@@ -32,7 +33,7 @@ def same_origin_write(request: Request):
             raise HTTPException(403,'研究操作的来源与当前 Cairn 服务不一致')
 
 
-router=APIRouter(prefix='/api/research/sessions',tags=['research'],dependencies=[Depends(same_origin_write)])
+router=APIRouter(prefix='/api/research/sessions',tags=['research'],dependencies=[Depends(require_admin), Depends(same_origin_write)])
 
 
 def validate_repo(repo):

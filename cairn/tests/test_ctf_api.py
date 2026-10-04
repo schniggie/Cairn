@@ -66,16 +66,18 @@ def test_config_put_and_token_masking(client: TestClient, monkeypatch: pytest.Mo
     assert client.get("/ctf/internal/config").status_code == 403
 
     monkeypatch.setattr("cairn.server.app.ADMIN_TOKEN", "admin-secret")
+    headers = {"Authorization": "Bearer admin-secret"}
+    assert client.get("/ctf/config").status_code == 403
     assert client.get("/ctf/internal/config", headers={"Authorization": "Bearer nope"}).status_code == 403
-    full = client.get("/ctf/internal/config", headers={"Authorization": "Bearer admin-secret"}).json()
+    full = client.get("/ctf/internal/config", headers=headers).json()
     assert full["token"] == "sekrit"
     assert full["team_name"] == "team-a"
-    assert client.get("/ctf/config").json()["token"] == "***"
+    assert client.get("/ctf/config", headers=headers).json()["token"] == "***"
 
     # explicit empty token clears it
-    client.put("/ctf/config", json={"token": ""})
-    assert client.get("/ctf/config?full=true").json()["token"] == ""
-    assert client.get("/ctf/internal/config", headers={"Authorization": "Bearer admin-secret"}).json()["token"] == ""
+    client.put("/ctf/config", json={"token": ""}, headers=headers)
+    assert client.get("/ctf/config?full=true", headers=headers).json()["token"] == ""
+    assert client.get("/ctf/internal/config", headers=headers).json()["token"] == ""
 
 
 def test_config_rejects_invalid_flag_regex(client: TestClient) -> None:
@@ -209,16 +211,14 @@ def test_config_extra_fields_and_model_secret_masking(client: TestClient, monkey
     assert client.get("/ctf/internal/config").status_code == 403
 
     monkeypatch.setattr("cairn.server.app.ADMIN_TOKEN", "admin-secret")
-    full = client.get("/ctf/internal/config", headers={"Authorization": "Bearer admin-secret"}).json()
+    headers = {"Authorization": "Bearer admin-secret"}
+    full = client.get("/ctf/internal/config", headers=headers).json()
     assert full["model_api_key"] == "sk-sekrit-model"
 
     # masked model key echoed back must not clobber the real one
-    client.put("/ctf/config", json={"model_api_key": "***"})
-    assert client.get("/ctf/config").json()["model_api_key"] == "***"
-    assert (
-        client.get("/ctf/internal/config", headers={"Authorization": "Bearer admin-secret"}).json()["model_api_key"]
-        == "sk-sekrit-model"
-    )
+    client.put("/ctf/config", json={"model_api_key": "***"}, headers=headers)
+    assert client.get("/ctf/config", headers=headers).json()["model_api_key"] == "***"
+    assert client.get("/ctf/internal/config", headers=headers).json()["model_api_key"] == "sk-sekrit-model"
 
 
 def test_heartbeat_reports_model_health(client: TestClient) -> None:

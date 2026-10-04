@@ -8,12 +8,13 @@ only shows "研究已排队" when a real worker is accepting work.
 import shutil
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from cairn.server import db
+from cairn.server.admin_auth import require_admin
 from cairn.server.research_services import read_worker_runtime
 
-router = APIRouter(prefix="/api/research", tags=["research"])
+router = APIRouter(prefix="/api/research", tags=["research"], dependencies=[Depends(require_admin)])
 
 # A worker that refreshed its marker within this window is considered available.
 AVAILABLE_FRESHNESS_SECONDS = 90

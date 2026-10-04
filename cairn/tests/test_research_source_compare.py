@@ -13,6 +13,14 @@ from cairn.server.routers.research import router as research_router
 from cairn.server.routers.research_source_compare import router
 
 
+_AUTH = {'Authorization': 'Bearer test-admin'}
+
+
+@pytest.fixture(autouse=True)
+def _research_admin(monkeypatch):
+    monkeypatch.setattr('cairn.server.app.ADMIN_TOKEN', 'test-admin')
+
+
 @pytest.fixture
 def client(tmp_path,monkeypatch):
     monkeypatch.setattr(db,'_db_path',None)
@@ -20,7 +28,7 @@ def client(tmp_path,monkeypatch):
     app=FastAPI()
     app.include_router(research_router)
     app.include_router(router)
-    with TestClient(app) as client:
+    with TestClient(app, headers=_AUTH) as client:
         yield client
 
 

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from cairn.server.admin_auth import require_admin
 from cairn.server.db import get_conn
 from cairn.server.dispatch_config_store import config_path, load_redacted_document, validate_and_save
 from cairn.server.event_store import insert_runtime_event
 from cairn.server.models import DispatchConfigDocument, UpdateDispatchConfigRequest
 
-router = APIRouter(tags=["dispatch-config"])
+router = APIRouter(tags=["dispatch-config"], dependencies=[Depends(require_admin)])
 
 
 @router.get("/dispatch-config", response_model=DispatchConfigDocument)

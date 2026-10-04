@@ -58,6 +58,7 @@ def test_api_does_not_treat_authorization_flag_as_approval(tmp_path, monkeypatch
     outside = tmp_path / "outside"
     outside.mkdir()
     monkeypatch.setattr(db, "_db_path", None)
+    monkeypatch.setattr("cairn.server.app.ADMIN_TOKEN", "test-admin")
     monkeypatch.setenv("CAIRN_RESEARCH_SOURCE_ROOT", str(allowed))
     db.configure(tmp_path / "research.db")
     app = FastAPI()
@@ -68,7 +69,7 @@ def test_api_does_not_treat_authorization_flag_as_approval(tmp_path, monkeypatch
         "repo": str(outside),
         "authorization_confirmed": True,
     }
-    with TestClient(app) as client:
+    with TestClient(app, headers={"Authorization": "Bearer test-admin"}) as client:
         response = client.post("/api/research/sessions", json=body)
         assert response.status_code == 422
         assert "已批准" in response.text
@@ -77,3 +78,8 @@ def test_api_does_not_treat_authorization_flag_as_approval(tmp_path, monkeypatch
         assert "敏感" in sensitive.text
         ok = client.post("/api/research/sessions", json={**body, "repo": str(allowed)})
         assert ok.status_code == 201, ok.text
+        anonymous = TestClient(app)
+        assert anonymous.get("/api/research/sessions").status_code == 403
+        monkeypatch.setattr("cairn.server.app.ADMIN_TOKEN", "")
+        assert anonymous.get(f"/api/research/sessions/{ok.json()['id']}").status_code == 403
+        assert anonymous.get(f"/api/research/sessions/{ok.json()['id']}/report.md").status_code == 403

@@ -5,9 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
 from cairn.server import research_identities as store
+from cairn.server.admin_auth import require_admin
 from cairn.server.routers.research import same_origin_write
 
-router=APIRouter(prefix='/api/research/sessions',tags=['research-identities'],dependencies=[Depends(same_origin_write)])
+router=APIRouter(prefix='/api/research/sessions',tags=['research-identities'],dependencies=[Depends(require_admin), Depends(same_origin_write)])
 
 
 async def _payload(request,fields):
