@@ -197,13 +197,14 @@ _USRMERGE_SYMLINKS = {
     "usr/lib64": "/lib64",
 }
 
-# Namespace + capability flags. We keep network shared (``--share-net``) so the model
-# can reach its gateway and the authorized target; everything else is unshared.
+# Namespace + capability flags. ``--unshare-all`` includes a fresh network
+# namespace and we do not pass ``--share-net``, so the sandbox has no route to
+# the host or the internet. Authorized HTTP(S) leaves only through the egress
+# bridge (a loopback forwarder spliced to the host proxy over a Unix socket).
 _BWRAP_COMMON = (
     "--die-with-parent",
     "--new-session",
     "--unshare-all",
-    "--share-net",
     "--cap-drop",
     "ALL",
 )

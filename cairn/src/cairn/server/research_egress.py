@@ -1,8 +1,9 @@
 """Controlled research egress: a local enforcement proxy the sandbox may not bypass.
 
-The execution layer starts a loopback ``EgressProxy`` and forces ALL of the sandbox's
-outbound TCP through it (sandbox proxy env + a preload ``connect()`` interceptor so
-direct-connect cannot skip the proxy). The proxy applies authorization at request time:
+The research sandbox has its own network namespace (bubblewrap ``--unshare-all``
+without ``--share-net``), so UDP, DNS, and raw sockets have no route out. The only
+way out is a loopback TCP forwarder inside that namespace, spliced over a Unix
+socket to this proxy. The proxy applies authorization at request time:
 
 * Only ``http`` and ``https`` targets are supported; other protocols are refused.
 * Each target request is checked against the approved scope, exclusion list, and the
@@ -19,8 +20,10 @@ real model. The worker owns start/stop and reads counters back into the run ledg
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import socket
+import socketserver
 import subprocess
 import tempfile
 import threading
@@ -29,6 +32,11 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
+
+# In-sandbox forwarder port. The host proxy is reached only via the Unix socket;
+# this port exists inside the sandbox network namespace and nowhere else.
+SANDBOX_PROXY_PORT = 18081
+SANDBOX_PROXY_URL = f"http://127.0.0.1:{SANDBOX_PROXY_PORT}"
 
 LOG = logging.getLogger(__name__)
 
@@ -193,6 +201,18 @@ class _EgressServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
+class _UnixEgressServer(socketserver.ThreadingUnixStreamServer):
+    daemon_threads = True
+
+    def server_bind(self):
+        path = self.server_address
+        if isinstance(path, str) and os.path.exists(path):
+            os.unlink(path)
+        super().server_bind()
+        if isinstance(path, str):
+            os.chmod(path, 0o600)
+
+
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -339,6 +359,10 @@ class EgressProxy:
         self.quota = QuotaState(remaining=request_quota, model_hosts=self.model_hosts)
         self._server = None
         self._thread = None
+        self._unix_server = None
+        self._unix_thread = None
+        self._unix_path: str | None = None
+        self._unix_cleanup_dir: str | None = None
         self.port = bind_port
         self.host = bind_host
         self.stash_model_host_rule = allow_loopback
@@ -354,11 +378,37 @@ class EgressProxy:
         self._thread.start()
         return self.port
 
+    def start_unix(self, path):
+        """Accept the same HTTP proxy protocol on a Unix socket.
+
+        The socket is bind-mounted read-only into the network namespace. The
+        sandbox cannot route to this process any other way.
+        """
+        server = _UnixEgressServer(str(path), _Handler)
+        server.proxy = self  # type: ignore[attr-defined]
+        self._unix_server = server
+        self._unix_path = str(path)
+        self._unix_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        self._unix_thread.start()
+        return self._unix_path
+
     def stop(self):
-        if self._server is not None:
-            self._server.shutdown()
-            self._server.server_close()
-            self._server = None
+        for server in (self._server, self._unix_server):
+            if server is None:
+                continue
+            server.shutdown()
+            server.server_close()
+        self._server = None
+        self._unix_server = None
+        if self._unix_path and os.path.exists(self._unix_path):
+            try:
+                os.unlink(self._unix_path)
+            except OSError:
+                pass
+        self._unix_path = None
+        if self._unix_cleanup_dir:
+            shutil.rmtree(self._unix_cleanup_dir, ignore_errors=True)
+            self._unix_cleanup_dir = None
 
     def decide(self, scheme, host, port):
         """Return (action, reason); action ∈ proxy_model | proxy_target | refuse_*."""
@@ -398,6 +448,97 @@ class EgressProxy:
         out_headers = {k: v for k, v in resp.getheaders()}
         conn.close()
         return status, out_headers, resp_body
+
+def _allocate_unix_socket(preferred: Path) -> tuple[Path, Path | None]:
+    """Pick a path that fits in ``sockaddr_un``.
+
+    Linux stores the pathname in 108 bytes including the trailing NUL. A
+    session directory under pytest or a long workspace can exceed that, and
+    ``bind()`` then fails before any byte is accepted. The listening socket
+    moves to a short directory; the sandbox still connects to the short
+    in-namespace path after a file bind.
+    """
+    if len(os.fsencode(preferred)) < 108:
+        return preferred, None
+    short = Path(tempfile.mkdtemp(prefix="cairn-eg-"))
+    os.chmod(short, 0o700)
+    return short / "s", short
+
+
+def stage_egress_bridge(config_root, proxy: "EgressProxy", preload_so=None) -> Path:
+    """Copy the forwarder and listen on a Unix socket for ``config_root``.
+
+    The returned directory is mounted read-only at ``/cairn-egress`` inside the
+    sandbox. It is not placed in the writable workspace or the writable Claude
+    config dir, so the model cannot replace the forwarder or the preload
+    library. ``preload_so``, when given, is copied in as ``libcairn_egress.so``
+    so the sandbox can load it without a separate mount. The listening socket
+    may live outside this directory when the preferred path is too long for
+    ``sockaddr_un``; ``host-socket`` records that host path for the bind mount.
+    """
+    root = Path(config_root)
+    dest = root / "egress-bridge"
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True, mode=0o700)
+    shutil.copy(Path(__file__).with_name("egress_forward.py"), dest / "forward.py")
+    os.chmod(dest / "forward.py", 0o644)
+    if preload_so:
+        staged = dest / "libcairn_egress.so"
+        shutil.copy(preload_so, staged)
+        os.chmod(staged, 0o644)
+    sock, cleanup = _allocate_unix_socket(dest / "egress.sock")
+    if cleanup is not None:
+        # bwrap needs a destination inode to mount the real socket onto.
+        (dest / "egress.sock").touch()
+    (dest / "host-socket").write_text(str(sock), encoding="utf-8")
+    os.chmod(dest / "host-socket", 0o644)
+    proxy._unix_cleanup_dir = str(cleanup) if cleanup else None
+    try:
+        proxy.start_unix(sock)
+    except OSError:
+        if cleanup is not None:
+            shutil.rmtree(cleanup, ignore_errors=True)
+        proxy._unix_cleanup_dir = None
+        raise
+    return dest
+
+
+def inject_egress_bridge(command: list[str], bridge_dir) -> list[str]:
+    """Mount the bridge and make it the sandbox entrypoint.
+
+    Proxy environment variables are set inside bubblewrap so an inherited
+    ``NO_PROXY`` cannot exempt a destination. The real command is executed by
+    the forwarder after it is listening. The host socket is file-mounted at
+    ``/cairn-egress/egress.sock`` so a long host path never becomes the name
+    the sandbox connects to.
+    """
+    if "--" not in command:
+        raise RuntimeError("sandbox command is missing its bubblewrap separator")
+    separator = command.index("--")
+    argv = command[separator + 1 :]
+    proxy = f"127.0.0.1:{SANDBOX_PROXY_PORT}"
+    bridge = Path(bridge_dir)
+    note = bridge / "host-socket"
+    host_sock = note.read_text(encoding="utf-8").strip() if note.is_file() else str(bridge / "egress.sock")
+    inject = [
+        "--ro-bind", str(bridge), "/cairn-egress",
+        "--ro-bind", host_sock, "/cairn-egress/egress.sock",
+        "--setenv", "CAIRN_EGRESS_SOCK", "/cairn-egress/egress.sock",
+        "--setenv", "CAIRN_EGRESS_PORT", str(SANDBOX_PROXY_PORT),
+        "--setenv", "CAIRN_EGRESS_PROXY", proxy,
+        "--setenv", "HTTP_PROXY", SANDBOX_PROXY_URL,
+        "--setenv", "HTTPS_PROXY", SANDBOX_PROXY_URL,
+        "--setenv", "ALL_PROXY", SANDBOX_PROXY_URL,
+        "--setenv", "http_proxy", SANDBOX_PROXY_URL,
+        "--setenv", "https_proxy", SANDBOX_PROXY_URL,
+        "--setenv", "all_proxy", SANDBOX_PROXY_URL,
+        "--unsetenv", "NO_PROXY",
+        "--unsetenv", "no_proxy",
+    ]
+    wrapped = ["/usr/bin/python3", "/cairn-egress/forward.py", "--", *argv]
+    return [*command[:separator], *inject, "--", *wrapped]
+
 
 def build_egress_preload(out_dir=None):
     """Compile ``egress_preload.c`` (the LD_PRELOAD ``connect()`` interceptor) into a
