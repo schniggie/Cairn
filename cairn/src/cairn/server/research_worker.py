@@ -288,17 +288,23 @@ class ResearchWorker:
         # LD_PRELOAD must be injected INSIDE the sandbox via bwrap --setenv (after the
         # /claude-config mount exists). Putting it in the outer env breaks bwrap's
         # user-namespace helper, which tries to load the interceptor before the sandbox
-        # mount is active. The proxy env vars stay in the outer env (harmless).
+        # mount is active. The network namespace is the egress boundary; the preload
+        # is defense in depth for dynamically linked direct connects.
         preload_path = getattr(self, "_egress_preload_path", None)
         if preload_path and "--" in boundary:
             i = boundary.index("--")
-            inject = ["--setenv", "LD_PRELOAD", preload_path]
-            # Overlay the interceptor as RO so the (now writable) config runtime dir
-            # cannot let the model tamper with enforcement.
-            host_so = getattr(self, "_egress_preload_host", None)
-            if host_so:
-                inject += ["--ro-bind", host_so, "/claude-config/libcairn_egress.so"]
-            boundary[i:i] = inject
+            # The library lives in the read-only /cairn-egress mount (staged with
+            # the bridge). Do not bind it under /claude-config: that directory is
+            # absent for CAIRN_CLAUDE_BIN runs and writable for real Claude runs.
+            boundary[i:i] = ["--setenv", "LD_PRELOAD", preload_path]
+        bridge_dir = getattr(self, "_egress_bridge_dir", None)
+        if egress_proxy is not None:
+            if bridge_dir is None:
+                self._finish(session_id, "failed", "出站控制无法建立，拒绝放行研究执行：缺少网络隔离桥")
+                egress_proxy.stop()
+                return
+            from cairn.server.research_egress import inject_egress_bridge
+            boundary = inject_egress_bridge(boundary, bridge_dir)
         run_env = worker_scoped_env()
         run_env.update(egress_env)
         process = LocalProcess(
@@ -377,25 +383,23 @@ class ResearchWorker:
     # -- per-batch settlement -------------------------------------------------
 
     def _egress_environment(self, session, remaining_requests: int, config_root=None):
-        """Build (proxy, env) to force egress through the local enforcement proxy.
-        Only activates for a REAL target run (not a test/fake override): the execution
-        layer starts a loopback proxy scoped to the approved URL, classifies the model's
-        own gateway as model traffic (never quota-counted), and injects the LD_PRELOAD
-        connect() interceptor so a direct connection cannot bypass the proxy.
+        """Build (proxy, env) for a real target run.
 
-        The interceptor shared object is compiled into the private read-only
-        /claude-config dir (already RO-bound into the sandbox), so its sandbox-internal
-        path is LD_PRELOADed — a host /tmp path would NOT be visible inside bwrap.
-
-        FAILS LOUDLY (raises) when enforcement cannot be established — never silently
-        falls back to proxy-env-only/disabled egress."""
+        The sandbox network namespace has no external route. This stages a Unix-socket
+        bridge to the scoped proxy (the only way out) and compiles the LD_PRELOAD
+        guard. A URL session always gets the bridge, including when ``CAIRN_CLAUDE_BIN``
+        points at a stand-in binary. Model-gateway traffic is classified separately
+        and is not quota-counted. FAILS LOUDLY when the bridge or the preload cannot
+        be built.
+        """
         url = session.get("url")
-        if not url or os.environ.get("CAIRN_CLAUDE_BIN"):
+        if not url:
             return None, {}
         try:
             from cairn.server.research_egress import (
-                DEFAULT_MODEL_HOSTS, EgressProxy, build_egress_preload,
-                extract_gateway_hosts,
+                DEFAULT_MODEL_HOSTS, SANDBOX_PROXY_PORT, SANDBOX_PROXY_URL,
+                EgressProxy, build_egress_preload, extract_gateway_hosts,
+                stage_egress_bridge,
             )
         except Exception as exc:
             raise RuntimeError(f"出站强制模块不可用：{exc}")
@@ -408,35 +412,44 @@ class ResearchWorker:
                             request_quota=max(0, int(remaining_requests)),
                             model_hosts=sorted(model_hosts))
         try:
-            port = proxy.start()
+            proxy.start()
         except OSError as exc:
             raise RuntimeError(f"无法启动本地出站代理：{exc}")
-        # Compile the connect() interceptor into the private claude-config dir (which
-        # build_sandbox already RO-binds at /claude-config) so it is visible inside the
-        # sandbox. A host /tmp path would be clobbered by bwrap's fresh tmpfs /tmp.
+        # Compile beside the bridge, then copy the library into the read-only
+        # egress mount. A host /tmp path would be hidden by bwrap's fresh /tmp,
+        # and /claude-config is not mounted when CAIRN_CLAUDE_BIN is set.
         if config_root is not None:
-            claude_dir = Path(config_root) / "claude-config-runtime"
-            claude_dir.mkdir(parents=True, exist_ok=True)
-            so = build_egress_preload(claude_dir)
-            so_in_sandbox = "/claude-config/libcairn_egress.so"
+            compile_dir = Path(config_root) / "egress-preload"
+            compile_dir.mkdir(parents=True, exist_ok=True)
+            so = build_egress_preload(compile_dir)
         else:
             so = build_egress_preload()
-            so_in_sandbox = so if so else None
         if so is None:
             proxy.stop()
-            # Without the connect() interceptor a direct socket could bypass the proxy;
-            # do not silently run research with uncontrolled egress.
+            # The network namespace is the boundary, and the preload refuses UDP and
+            # non-proxy loopback for dynamically linked processes. Do not run without it.
             raise RuntimeError("缺少 C 编译器，无法建立出站强制（直接连接可能绕过代理）；拒绝放行研究执行")
+        if config_root is None:
+            proxy.stop()
+            raise RuntimeError("出站桥需要私有配置目录；拒绝放行研究执行")
+        try:
+            self._egress_bridge_dir = stage_egress_bridge(config_root, proxy, preload_so=so)
+        except OSError as exc:
+            proxy.stop()
+            raise RuntimeError(f"无法建立出站网络隔离桥：{exc}") from exc
         # The interceptor is referenced by its SANDBOX-internal path and injected via
         # bwrap --setenv by the caller (NOT in the outer env — see run_session).
-        self._egress_preload_path = so_in_sandbox
-        self._egress_preload_host = str(so)
+        # Proxy env points at the in-sandbox forwarder, not the host TCP listener.
+        self._egress_preload_path = "/cairn-egress/libcairn_egress.so"
+        self._egress_preload_host = None
         env = {
-            "HTTP_PROXY": f"http://127.0.0.1:{port}",
-            "HTTPS_PROXY": f"http://127.0.0.1:{port}",
-            "ALL_PROXY": f"http://127.0.0.1:{port}",
-            "NO_PROXY": "127.0.0.1,localhost,::1",
-            "CAIRN_EGRESS_PROXY": f"127.0.0.1:{port}",
+            "HTTP_PROXY": SANDBOX_PROXY_URL,
+            "HTTPS_PROXY": SANDBOX_PROXY_URL,
+            "ALL_PROXY": SANDBOX_PROXY_URL,
+            "http_proxy": SANDBOX_PROXY_URL,
+            "https_proxy": SANDBOX_PROXY_URL,
+            "all_proxy": SANDBOX_PROXY_URL,
+            "CAIRN_EGRESS_PROXY": f"127.0.0.1:{SANDBOX_PROXY_PORT}",
         }
         return proxy, env
 
@@ -520,11 +533,10 @@ class ResearchWorker:
 
     def _build_claude_argv(self, prompt: str, *, remaining_cost: float) -> list[str]:
         # Run non-interactively, emit JSON, and auto-approve tools INSIDE the sandbox:
-        # the real boundary is the bwrap filesystem + the scoped/counted egress proxy
-        # (every target request goes through it), so bypassing Claude's own permission
-        # prompts lets the model actually run Bash/curl to research the authorized
-        # target. Outside the sandbox this flag would be dangerous; here egress and
-        # file access are already bounded.
+        # the real boundary is the bwrap filesystem plus a network namespace whose only
+        # exit is the scoped egress proxy. Bypassing Claude's own permission prompts
+        # lets the model run Bash/curl against the authorized target. Outside the
+        # sandbox this flag would be dangerous; here file access and egress are bounded.
         argv = ["--output-format", "json", "-p", "--permission-mode", "bypassPermissions"]
         if remaining_cost > 0:
             argv += ["--max-budget-usd", f"{remaining_cost:.6f}"]

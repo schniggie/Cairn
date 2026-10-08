@@ -2,7 +2,7 @@
 
 This branch pulls selected work from public Cairn forks onto `schniggie/Cairn` `main` (upstream `oritera/Cairn` at `8e7e0ea`, docs: add logo). Each landed fork is its own commit so it can be reverted. English prompts and the main README stay the defaults. Chinese text is an extra `zh-CN` prompt group and packaging notes.
 
-`uv run --group dev pytest -q` from `cairn/`: **598 passed, 2 skipped**.
+`uv run --group dev pytest -q` from `cairn/`: **632 passed, 2 skipped**.
 
 Not verified here: Docker image builds, GHCR publish, browser UI, Playwright browser install, live CTF platforms, and a host `claude` binary for the research runtime status test.
 
@@ -148,6 +148,12 @@ Merging either alternative PR only adds the upstream source under `integrations/
 Project Origin may name an operator-approved credential id (`demo` or `secret:demo`). The environment variable, base URL, and allowlist come from `target_credentials` in the dispatch config. If Origin's target URL does not match that binding, the harness does not attach the credential. `env:VAR` is not resolved. `CAIRN_ADMIN_TOKEN`, `CAIRN_SAFETY_TOKEN`, and `CAIRN_AUTH_HELPER_TOKEN` cannot be target credentials. `POST /projects/{id}/intents/{id}/fire` requires the admin bearer and returns 403 when `CAIRN_ADMIN_TOKEN` is unset.
 
 A verify with no `credentials_ref` still uses Origin's URL and allowlist and does not attach a dispatcher secret.
+
+## Research egress
+
+The research sandbox does not share the host network. Bubblewrap `--unshare-all` is used without `--share-net`, so the process has no route for TCP, UDP, or DNS. Every session that has a target URL gets this boundary, including when `CAIRN_CLAUDE_BIN` points at a stand-in binary. Authorized HTTP(S) is sent to a loopback forwarder inside that namespace, which splices the bytes over a read-only Unix socket to the host egress proxy. The proxy checks scope and request quota, and it resolves names. The LD_PRELOAD library is a second layer for dynamically linked processes: it refuses UDP and raw sends, and it refuses loopback TCP except the forwarder port. A run with a target URL is refused if that library cannot be compiled.
+
+A malicious authorized target can still receive repository contents over HTTP within the request quota. That is the research task, not a bypass. Traffic to any other host, including DNS to an attacker resolver, has no route out. Codex, Pi, OpenCode, and Gemini research runs use the same sandbox when they go through this worker. Dispatcher task workers (bootstrap, explore, reason, verify) are a separate path and are not covered by this namespace.
 
 ## Known residual risk: CTF prompt injection and worker egress
 
