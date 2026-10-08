@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import importlib
 
 from cairn.dispatcher.config import ContainerConfig
 from cairn.dispatcher.protocol.client import ApiResult
@@ -101,17 +102,43 @@ def test_stopped_container_cleanup_is_noop_after_container_has_already_stopped()
     assert manager.cleanup_stopped("proj_001")
 
 
+def test_container_prefix_can_be_overridden_by_environment(monkeypatch) -> None:
+    import cairn.dispatcher.runtime.containers as containers_module
+
+    monkeypatch.setenv("CAIRN_CONTAINER_PREFIX", "isolated-run-")
+    reloaded = importlib.reload(containers_module)
+    try:
+        manager = reloaded.ContainerManager.__new__(reloaded.ContainerManager)
+        assert manager.container_name("proj/001") == "isolated-run-proj-001"
+    finally:
+        monkeypatch.delenv("CAIRN_CONTAINER_PREFIX")
+        importlib.reload(containers_module)
+
+
+def test_blank_container_prefix_falls_back_to_default(monkeypatch) -> None:
+    import cairn.dispatcher.runtime.containers as containers_module
+
+    monkeypatch.setenv("CAIRN_CONTAINER_PREFIX", "   ")
+    reloaded = importlib.reload(containers_module)
+    try:
+        manager = reloaded.ContainerManager.__new__(reloaded.ContainerManager)
+        assert manager.container_name("proj_001") == "cairn-dispatch-proj_001"
+    finally:
+        monkeypatch.delenv("CAIRN_CONTAINER_PREFIX")
+        importlib.reload(containers_module)
+
+
 def test_write_text_file_uses_archive_api_and_rejects_false_result() -> None:
     manager = _manager()
     container = FakeContainer()
     manager._require_container = lambda _name: container
 
-    manager.write_text_file("container", "/tmp/graph.yaml", "facts: []\n")
+    manager.write_text_file("container", "/tmp/cairn-prompts/graph.yaml", "facts: []\n")
     assert container.archives[0][0] == "/tmp"
 
     container.archive_result = False
     try:
-        manager.write_text_file("container", "/tmp/graph.yaml", "facts: []\n")
+        manager.write_text_file("container", "/tmp/cairn-prompts/graph.yaml", "facts: []\n")
     except RuntimeError as exc:
         assert "failed to write container file" in str(exc)
     else:

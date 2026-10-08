@@ -7,34 +7,80 @@ on:
       - main
     paths:
       - "container/**"
+      - "cairn/**"
+      - "docker-compose.yaml"
+      - "dispatch*.yaml"
+      - ".github/workflows/build-container-ghcr.yml"
 
 permissions:
-  packages: write
+  contents: read
+
+env:
+  WORKER_IMAGE_NAME: cairn-worker-container
 
 jobs:
-  docker:
+  test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.8.9"
+          enable-cache: false
+
+      - name: Run Python test suite
+        working-directory: cairn
+        run: uv run --group dev pytest -q
+
+      - name: Build wheel
+        run: uv build --project cairn
+
+      - name: Verify packaged Pi safety extension
+        run: python -c "import glob,zipfile; p=glob.glob('cairn/dist/*.whl')[0]; n=zipfile.ZipFile(p).namelist(); assert any(x.endswith('safety/pi_extension/index.ts') for x in n); assert any(x.endswith('safety/pi_extension/transport.mjs') for x in n)"
+
+  docker:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Lowercase image owner
+        id: image
+        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Build local worker image
+        run: docker build ./container -t cairn-worker-container:local
+
+      - name: Smoke-test worker binaries
+        run: docker run --rm --entrypoint /bin/bash cairn-worker-container:local -lc 'pi --version && claude --version && codex --version'
+
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: ./container
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/cairn-worker-container:latest
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn-worker-container:buildcache
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/cairn-worker-container:buildcache,mode=max
+          tags: ghcr.io/${{ steps.image.outputs.owner }}/${{ env.WORKER_IMAGE_NAME }}:latest
+          cache-from: type=registry,ref=ghcr.io/${{ steps.image.outputs.owner }}/${{ env.WORKER_IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ steps.image.outputs.owner }}/${{ env.WORKER_IMAGE_NAME }}:buildcache,mode=max

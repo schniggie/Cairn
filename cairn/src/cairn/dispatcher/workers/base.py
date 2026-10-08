@@ -3,16 +3,41 @@ from __future__ import annotations
 import abc
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from cairn.dispatcher.config import WorkerConfig
 from cairn.dispatcher.workers.health import HealthResult
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeAsset:
+    path: str
+    content: str
+
+
+@dataclass(slots=True)
+class AnalysisResponse:
+    text: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+    model: str | None = None
+
+
+@dataclass(slots=True)
+class TrajectoryStep:
+    step_id: int
+    action: str
+    observation: str | None = None
+    tool_type: str | None = None
+    thinking: str | None = None
 
 
 @dataclass(slots=True)
 class DriverResult:
     argv: list[str]
     session: str | None = None
+    assets: tuple[RuntimeAsset, ...] = ()
+    stdin: str | None = None
 
 
 class WorkerDriver(abc.ABC):
@@ -44,14 +69,29 @@ class WorkerDriver(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def build_conclude(self, worker: WorkerConfig, prompt: str, session: str) -> list[str]:
+    def build_conclude(self, worker: WorkerConfig, prompt: str, session: str) -> DriverResult:
         raise NotImplementedError
+
+    @staticmethod
+    def model_args(worker: WorkerConfig) -> list[str]:
+        """Optional per-worker model override. Empty when ``worker.model`` is unset."""
+        if worker.model:
+            return ["--model", worker.model]
+        return []
 
     def extract_session(self, session: str | None, stdout: str, stderr: str) -> str | None:
         return session
 
     def extract_response_text(self, stdout: str, stderr: str) -> str:
         return stdout
+
+    def extract_analysis_response(self, stdout: str, stderr: str) -> AnalysisResponse:
+        """Extract structured analysis text and bounded, non-secret execution metadata."""
+        return AnalysisResponse(text=self.extract_response_text(stdout, stderr))
+
+    def extract_trajectory(self, session_data: str) -> list[TrajectoryStep]:
+        """Parse a raw session log into trajectory steps. Drivers override this."""
+        return []
 
 
 class SeedSessionDriver(WorkerDriver):

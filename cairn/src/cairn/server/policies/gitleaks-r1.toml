@@ -1,0 +1,4 @@
+title = "Cairn R1 authorized local repository policy"
+
+[extend]
+useDefault = true

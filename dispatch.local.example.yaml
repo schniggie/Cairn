@@ -15,6 +15,12 @@
 
 server: "http://127.0.0.1:8000"
 
+# Optional Pi preflight. Set enabled: true and export CAIRN_SAFETY_TOKEN in both shells.
+safety:
+  enabled: false
+  endpoint: "http://127.0.0.1:8000/internal/safety"
+  token_env: "CAIRN_SAFETY_TOKEN"
+
 runtime:
   execution: local            # run workers as host processes instead of per-project containers
   worker_healthcheck: disabled  # no base_url to probe; startup instead checks the CLIs are on PATH
@@ -23,6 +29,12 @@ runtime:
   max_project_workers: 2
   interval: 3
   healthcheck_timeout: 15
+  # Optional: tolerate transient server heartbeat failures longer than 2 * interval.
+  # heartbeat_failure_grace: 90
+  # Optional: update server intent/reason leases when the dispatcher starts.
+  # server_lease_timeout: 120
+  # Optional: stop a project after this many seconds from its first persisted intent.
+  # project_timeout: 14400
   prompt_group: "default"
 
 tasks:

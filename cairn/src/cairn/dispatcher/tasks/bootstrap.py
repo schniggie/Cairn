@@ -2,31 +2,42 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 
 from cairn.dispatcher.config import DispatchConfig, WorkerConfig
 from cairn.dispatcher.contracts import (
+    detach_http_records,
     parse_json_output,
     validate_bootstrap_conclude_payload,
     validate_bootstrap_execute_payload,
 )
-from cairn.dispatcher.prompting import format_hints, load_prompt, render_prompt
+from cairn.dispatcher.prompting import already_fenced, fence_untrusted, format_hints, load_prompt, render_prompt
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.runtime.heartbeat import HeartbeatLease
 from cairn.dispatcher.tasks.common import (
+    ensure_static_container,
+    knowledge_prompt,
+    backfill_safety_fallbacks,
     best_effort_release,
     cancel_reason,
     did_timeout,
+    latest_blocked_action,
+    persist_http_records,
     project_allows_conclude_fallback,
     preview,
     run_worker_process,
+    save_session_log,
+    SafetyRunContext,
     task_healthcheck_enabled,
     write_conclude_result,
     write_conclude_result_with_fact_id,
 )
-from cairn.dispatcher.workers.registry import get_driver
-from cairn.server.models import Intent, ProjectDetail
+from cairn.safety.r1 import is_r1_fact, synthesize_r1_fact
+from cairn.safety.v1 import is_v1_fact, render_safety_decision_context, synthesize_v1_fact
+from cairn.dispatcher.workers.registry import execution_mode_for, get_driver
+from cairn.server.models import AuditEvent, Intent, ProjectDetail
 
 LOG = logging.getLogger(__name__)
 
@@ -40,13 +51,24 @@ def run_bootstrap_task(
     worker: WorkerConfig,
     cancellation: TaskCancellation,
 ) -> str:
-    driver = get_driver(worker.type, config.runtime.execution)
+    driver = get_driver(worker.type, execution_mode_for(container_manager, config.runtime.execution))
+    run_id = uuid.uuid4().hex
     task_started = time.perf_counter()
     healthcheck_timeout = config.runtime.healthcheck_timeout
-    lease = HeartbeatLease.for_intent(client, project.project.id, intent.id, worker.name, config.runtime.interval)
+    lease = HeartbeatLease.for_intent(
+        client, project.project.id, intent.id, worker.name, config.runtime.interval,
+        config.runtime.heartbeat_failure_grace or config.runtime.interval * 2,
+    )
     lease.start()
+    container_name = ""
+    session: str | None = None
     try:
-        container_name = container_manager.ensure_running(project.project.id)
+        container_name, codebase_error = ensure_static_container(config, container_manager, project)
+        if codebase_error:
+            best_effort_release(client, project.project.id, intent.id, worker.name)
+            return "failed"
+        assert container_name is not None
+        _inject_init_files(container_manager, container_name, project)
 
         if task_healthcheck_enabled(config):
             LOG.info(
@@ -91,7 +113,10 @@ def run_bootstrap_task(
 
         prompt = render_prompt(
             load_prompt(config.runtime.prompt_group, "bootstrap.md"),
-            _bootstrap_prompt_replacements(project),
+            {
+                **_bootstrap_prompt_replacements(project),
+                **knowledge_prompt(container_manager, container_name, project.project.project_root),
+            },
         )
 
         session = driver.prepare_session()
@@ -102,12 +127,23 @@ def run_bootstrap_task(
             container_manager,
             container_name,
             worker,
-            execute.argv,
+            execute,
             phase="bootstrap",
             timeout_seconds=config.tasks.bootstrap.timeout,
+            safety=config.safety,
+            safety_context=SafetyRunContext(
+                run_id=run_id,
+                project_id=project.project.id,
+                intent_id=intent.id,
+                worker=worker.name,
+                phase="bootstrap",
+            ),
             lease=lease,
             cancellation=cancellation,
+            stdin=execute.stdin,
         )
+        backfill_safety_fallbacks(client, first.stderr, config.safety)
+        safety_decision = latest_blocked_action(client, project.project.id, run_id)
         execute_ms = int((time.perf_counter() - execute_started) * 1000)
         session = driver.extract_session(session, first.stdout, first.stderr)
         cancelled = cancel_reason(first, cancellation)
@@ -137,6 +173,7 @@ def run_bootstrap_task(
             try:
                 model_output = driver.extract_response_text(first.stdout, first.stderr)
                 payload = parse_json_output(model_output)
+                payload, http_records = detach_http_records(payload)
                 kind, data = validate_bootstrap_execute_payload(payload)
             except Exception as exc:
                 LOG.warning(
@@ -160,10 +197,17 @@ def run_bootstrap_task(
                     project,
                     intent,
                     session,
+                    run_id,
                     lease,
                     cancellation,
+                    safety_decision,
                 )
+            persist_http_records(client, project.project.id, intent.id, worker.name, http_records)
             if kind == "rejected":
+                if safety_decision is not None:
+                    return _write_synthesized_safety_fact(
+                        client, project.project.id, intent, worker.name, safety_decision, execute_ms
+                    )
                 LOG.warning(
                     "bootstrap rejected project=%s intent=%s worker=%s execute_ms=%s total_ms=%s stdout_preview=%s",
                     project.project.id,
@@ -175,6 +219,32 @@ def run_bootstrap_task(
                 )
                 best_effort_release(client, project.project.id, intent.id, worker.name)
                 return "rejected"
+            if safety_decision is not None:
+                if _is_required_safety_fact(data["fact_description"], safety_decision):
+                    return write_conclude_result(
+                        client,
+                        project.project.id,
+                        intent.id,
+                        worker.name,
+                        data["fact_description"],
+                        source="bootstrap_safety",
+                        phase_ms=execute_ms,
+                    )
+                return _try_conclude_fallback(
+                    config,
+                    client,
+                    container_manager,
+                    container_name,
+                    worker,
+                    driver,
+                    project,
+                    intent,
+                    session,
+                    run_id,
+                    lease,
+                    cancellation,
+                    safety_decision,
+                )
             return _write_bootstrap_complete_result(
                 client,
                 project.project.id,
@@ -207,8 +277,26 @@ def run_bootstrap_task(
                 project,
                 intent,
                 session,
+                run_id,
                 lease,
                 cancellation,
+                safety_decision,
+            )
+        if safety_decision is not None:
+            return _try_conclude_fallback(
+                config,
+                client,
+                container_manager,
+                container_name,
+                worker,
+                driver,
+                project,
+                intent,
+                session,
+                run_id,
+                lease,
+                cancellation,
+                safety_decision,
             )
         LOG.warning(
             "bootstrap command failed project=%s intent=%s worker=%s code=%s execute_ms=%s total_ms=%s stdout_preview=%s stderr_preview=%s",
@@ -228,6 +316,10 @@ def run_bootstrap_task(
         best_effort_release(client, project.project.id, intent.id, worker.name)
         return "failed"
     finally:
+        if container_name:
+            save_session_log(
+                container_manager, container_name, project.project.id, worker.name, session, phase="bootstrap"
+            )
         lease.stop()
 
 
@@ -241,8 +333,10 @@ def _try_conclude_fallback(
     project: ProjectDetail,
     intent: Intent,
     session: str | None,
+    run_id: str,
     lease: HeartbeatLease,
     cancellation: TaskCancellation,
+    safety_decision: AuditEvent | None = None,
 ) -> str:
     if not driver.supports_conclude() or not session:
         LOG.info(
@@ -253,6 +347,10 @@ def _try_conclude_fallback(
             driver.supports_conclude(),
             bool(session),
         )
+        if safety_decision is not None:
+            return _write_synthesized_safety_fact(
+                client, project.project.id, intent, worker.name, safety_decision, 0
+            )
         best_effort_release(client, project.project.id, intent.id, worker.name)
         return "failed"
     if lease.failure is not None:
@@ -284,25 +382,42 @@ def _try_conclude_fallback(
         best_effort_release(client, project.project.id, intent.id, worker.name)
         return "failed"
 
-    container_name = container_manager.ensure_running(project.project.id)
+    container_name = container_manager.ensure_running(
+        project.project.id, project_root=project.project.project_root
+    )
 
     prompt = render_prompt(
         load_prompt(config.runtime.prompt_group, "bootstrap_conclude.md"),
-        _bootstrap_prompt_replacements(project),
+        {
+            **_bootstrap_prompt_replacements(project),
+            **knowledge_prompt(container_manager, container_name, project.project.project_root),
+            "safety_decision_context": render_safety_decision_context(safety_decision),
+        },
     )
-    conclude_argv = driver.build_conclude(worker, prompt, session)
+    conclude_command = driver.build_conclude(worker, prompt, session)
     LOG.info("starting bootstrap conclude fallback project=%s intent=%s worker=%s", project.project.id, intent.id, worker.name)
     conclude_started = time.perf_counter()
     result = run_worker_process(
         container_manager,
         container_name,
         worker,
-        conclude_argv,
+        conclude_command,
         phase="bootstrap_conclude",
         timeout_seconds=config.tasks.bootstrap.conclude_timeout,
+        safety=config.safety,
+        safety_context=SafetyRunContext(
+            run_id=run_id,
+            project_id=project.project.id,
+            intent_id=intent.id,
+            worker=worker.name,
+            phase="bootstrap_conclude",
+        ),
         lease=lease,
         cancellation=cancellation,
+        stdin=conclude_command.stdin,
     )
+    backfill_safety_fallbacks(client, result.stderr, config.safety)
+    safety_decision = latest_blocked_action(client, project.project.id, run_id) or safety_decision
     conclude_ms = int((time.perf_counter() - conclude_started) * 1000)
     cancelled = cancel_reason(result, cancellation)
     if cancelled is not None:
@@ -317,6 +432,10 @@ def _try_conclude_fallback(
         best_effort_release(client, project.project.id, intent.id, worker.name)
         return "cancelled"
     if lease.failure is not None:
+        if safety_decision is not None:
+            return _write_synthesized_safety_fact(
+                client, project.project.id, intent, worker.name, safety_decision, conclude_ms
+            )
         best_effort_release(client, project.project.id, intent.id, worker.name)
         return "failed"
     if result.timed_out or result.returncode != 0:
@@ -336,6 +455,7 @@ def _try_conclude_fallback(
     try:
         model_output = driver.extract_response_text(result.stdout, result.stderr)
         payload = parse_json_output(model_output)
+        payload, http_records = detach_http_records(payload)
         conclude_data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
         if isinstance(conclude_data, dict) and isinstance(conclude_data.get("complete"), dict):
             LOG.warning(
@@ -357,9 +477,18 @@ def _try_conclude_fallback(
             preview(result.stdout),
             preview(result.stderr),
         )
+        if safety_decision is not None:
+            return _write_synthesized_safety_fact(
+                client, project.project.id, intent, worker.name, safety_decision, conclude_ms
+            )
         best_effort_release(client, project.project.id, intent.id, worker.name)
         return "failed"
+    persist_http_records(client, project.project.id, intent.id, worker.name, http_records)
     if kind == "rejected":
+        if safety_decision is not None:
+            return _write_synthesized_safety_fact(
+                client, project.project.id, intent, worker.name, safety_decision, conclude_ms
+            )
         LOG.warning(
             "bootstrap conclude rejected project=%s intent=%s worker=%s conclude_ms=%s stdout_preview=%s",
             project.project.id,
@@ -370,6 +499,10 @@ def _try_conclude_fallback(
         )
         best_effort_release(client, project.project.id, intent.id, worker.name)
         return "rejected"
+    if safety_decision is not None and not _is_required_safety_fact(fact_description, safety_decision):
+        return _write_synthesized_safety_fact(
+            client, project.project.id, intent, worker.name, safety_decision, conclude_ms
+        )
     return write_conclude_result(
         client,
         project.project.id,
@@ -381,12 +514,45 @@ def _try_conclude_fallback(
     )
 
 
+def _is_required_safety_fact(description: str, event: AuditEvent) -> bool:
+    if event.decision == "resource_pause":
+        return is_r1_fact(description)
+    return is_v1_fact(description)
+
+
+def _write_synthesized_safety_fact(
+    client: CairnClient,
+    project_id: str,
+    intent: Intent,
+    worker_name: str,
+    event: AuditEvent,
+    phase_ms: int,
+) -> str:
+    if event.decision == "resource_pause":
+        description = synthesize_r1_fact(intent.description, event)
+    else:
+        description = synthesize_v1_fact(intent.description, event)
+    return write_conclude_result(
+        client,
+        project_id,
+        intent.id,
+        worker_name,
+        description,
+        source="safety_synthesized",
+        phase_ms=phase_ms,
+    )
+
+
 def _bootstrap_prompt_replacements(project: ProjectDetail) -> dict[str, str]:
     facts = {fact.id: fact.description for fact in project.facts}
     hints = [
         {
             "id": hint.id,
-            "content": hint.content,
+            "content": (
+                hint.content
+                if hint.creator != "ctf" or already_fenced(hint.content)
+                else fence_untrusted(hint.content)
+            ),
             "creator": hint.creator,
             "created_at": hint.created_at,
         }
@@ -479,3 +645,29 @@ def _write_bootstrap_complete_result(
             total_ms,
         )
     return "success"
+
+
+def _inject_init_files(container_manager, container_name: str, project) -> None:
+    """Write project init_files into the worker workspace before execution."""
+    import base64
+
+    from cairn.dispatcher.runtime.workspace_files import (
+        InitFilePathError,
+        container_init_destination,
+        local_init_destination,
+    )
+
+    local = type(container_manager).__name__ == "LocalBackend"
+    init_files = getattr(project, "init_files", None) or []
+    for item in init_files:
+        try:
+            if local:
+                destination = str(local_init_destination(container_name, item.path))
+            else:
+                destination = container_init_destination(item.path)
+            if item.encoding == "base64":
+                container_manager.write_binary_file(container_name, destination, base64.b64decode(item.content))
+            else:
+                container_manager.write_text_file(container_name, destination, item.content)
+        except (InitFilePathError, ValueError, OSError) as exc:
+            LOG.warning("failed to inject init_file path=%s project=%s error=%s", item.path, project.project.id, exc)

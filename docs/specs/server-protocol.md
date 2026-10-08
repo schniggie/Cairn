@@ -349,6 +349,7 @@ Body：
   "title": "xx渗透测试（复盘）",
   "status": "completed",
   "created_at": "2026-03-21T10:00:00Z",
+  "started_at": "2026-03-21T10:02:00Z",
   "reason": null
 }
 ```
@@ -360,6 +361,8 @@ Body：
 更新项目状态。仅允许 `active` 和 `stopped` 之间切换。`completed` 项目不可通过该接口再次变更状态；若需要撤销完成态，必须调用专用的 `reopen` 接口。该接口属于项目管理操作，不属于探索写操作。
 
 当项目切到 `stopped` 时，Server 会立即把所有尚无结论的 Intent 的 `worker` 清空为 `null`，并把 `project.reason` 清空，使这些 claim 立刻失效。这样项目恢复后可以马上重新认领，不必等待超时。`stopped` 的语义是硬停止：Server 负责拒绝后续探索写操作并清空 open intent claim / reason lease；消费者拿到这个信号后应立刻取消本地仍在运行的任务，并停止对应项目容器。
+
+`project.started_at` 在第一个 Intent claim 或 Reason claim 时写入，用作跨任务、跨 Dispatcher 重启的项目运行周期起点。项目从 `stopped` 显式恢复为 `active`，或通过 `reopen` 撤销 completed 状态时，`started_at` 会清空；下一次 claim 会开始新的运行周期。
 
 已知问题：当前协议里，Intent 级只保存“当前 claim 持有者”这一份信息，也就是 `intent.worker`。因此项目一旦被切到 `stopped`，这些 open intent 的 `worker` 会被立即清空；停止后从项目详情里将无法直接看出“该 intent 在停止前最后是由哪个 worker 在推进”。后续可以考虑增加类似 `worker_history` 的 Intent 级历史字段来保留这部分可见性，但当前版本尚未实现。
 
@@ -379,6 +382,7 @@ Body：
   "title": "xx渗透测试",
   "status": "stopped",
   "created_at": "2026-03-21T10:00:00Z",
+  "started_at": "2026-03-21T10:02:00Z",
   "reason": null
 }
 ```
@@ -862,3 +866,18 @@ intents:
    b. 项目回到 `active`，图中新增一条 `external_feedback` 结论边和一个纠错 Fact
    c. 回到步骤 1
 ```
+
+
+## Safety audit protocol
+
+### Internal writes
+
+`POST /internal/safety/preflight` classifies one proposed Pi tool call and atomically appends an `ACTION_DECISION`. `POST /internal/safety/events` appends result, assistant, agent-end, or Dispatcher backfill events. Both require `X-Cairn-Safety-Token`; a missing server token returns 503 and an invalid token returns 401. Event writes are append-only and idempotent by `event_id`; reusing an ID with different content returns 409.
+
+### Project audit query
+
+`GET /projects/{project_id}/audit` accepts `intent_id`, `run_id`, `event_type`, `decision`, `tool_name`, `after`, and `limit`. Results are ordered by server timestamp and event ID and return `items` plus an optional opaque `next` cursor. Each item includes correlation IDs, worker/phase/tool, decision/rule/reason, normalized payload, SHA-256, truncation flag, and timestamp.
+
+### Branch closure
+
+Committed `block` decisions map to `[V1][BRANCH_CLOSED]`; `resource_pause` decisions map to `[R1][RESOURCE_PAUSED]`. These Facts conclude only the associated current Intent. They do not complete or stop the project, and R1 does not confirm a vulnerability.

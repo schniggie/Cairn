@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import signal
 import subprocess
+import sys
 import threading
 from contextlib import suppress
 
-from cairn.dispatcher.runtime.process import ProcessResult
+from cairn.dispatcher.runtime.process import (
+    BoundedTextBuffer,
+    ImportantJsonLineBuffer,
+    ProcessResult,
+    STDERR_HEAD_LIMIT,
+    STDERR_TAIL_LIMIT,
+    STDOUT_HEAD_LIMIT,
+    STDOUT_TAIL_LIMIT,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -32,15 +42,18 @@ class LocalProcess:
         env: dict[str, str],
         timeout_seconds: int | None = None,
         term_grace_seconds: int = 5,
+        stdin: str | None = None,
     ):
         self.command = command
         self.env = env
+        self.stdin = stdin
         self._cwd = cwd
         self._timeout_seconds = timeout_seconds
         self._term_grace = max(1.0, float(term_grace_seconds))
         self._process: subprocess.Popen[str] | None = None
-        self._stdout_chunks: list[str] = []
-        self._stderr_chunks: list[str] = []
+        self._stdout = BoundedTextBuffer(STDOUT_HEAD_LIMIT, STDOUT_TAIL_LIMIT)
+        self._stderr = BoundedTextBuffer(STDERR_HEAD_LIMIT, STDERR_TAIL_LIMIT)
+        self._important_stdout = ImportantJsonLineBuffer()
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
         self._timed_out = False
@@ -48,22 +61,32 @@ class LocalProcess:
         self._kill_lock = threading.Lock()
 
     def start(self) -> None:
+        popen_kwargs: dict[str, object] = {
+            "cwd": self._cwd,
+            "env": self.env,
+            "stdin": subprocess.PIPE if self.stdin is not None else subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
         self._process = subprocess.Popen(
-            self.command,
-            cwd=self._cwd,
-            env=self.env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            start_new_session=True,
+            self._resolve_command(),
+            **popen_kwargs,
         )
+        if self.stdin is not None and self._process.stdin is not None:
+            self._process.stdin.write(self.stdin)
+            self._process.stdin.close()
         self._stdout_thread = threading.Thread(
-            target=self._drain, args=(self._process.stdout, self._stdout_chunks), daemon=True
+            target=self._drain, args=(self._process.stdout, self._stdout, self._important_stdout), daemon=True
         )
         self._stderr_thread = threading.Thread(
-            target=self._drain, args=(self._process.stderr, self._stderr_chunks), daemon=True
+            target=self._drain, args=(self._process.stderr, self._stderr, None), daemon=True
         )
         self._stdout_thread.start()
         self._stderr_thread.start()
@@ -85,10 +108,14 @@ class LocalProcess:
         returncode = self._process.returncode
         if returncode is None:
             returncode = 137 if self._timed_out else 1
+        stdout = self._stdout.value()
+        important = self._important_stdout.value()
+        if important:
+            stdout += "\n" + important + "\n"
         return ProcessResult(
             returncode=returncode,
-            stdout="".join(self._stdout_chunks),
-            stderr="".join(self._stderr_chunks),
+            stdout=stdout,
+            stderr=self._stderr.value(),
             timed_out=self._timed_out,
             cancelled=self._cancel_reason is not None,
             cancel_reason=self._cancel_reason,
@@ -113,10 +140,41 @@ class LocalProcess:
                 return
             except subprocess.TimeoutExpired:
                 pass
-            self._signal_group(process, signal.SIGKILL)
+            self._signal_group(process, signal.SIGTERM, force=True)
+
+    def _resolve_command(self) -> list[str]:
+        if os.name != "nt" or not self.command:
+            return self.command
+        executable = self.command[0]
+        env_lower = {key.lower(): value for key, value in self.env.items()}
+        path = env_lower.get("path") or ""
+        pathext = env_lower.get("pathext") or os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD"
+        suffixes = tuple(ext.lower() for ext in pathext.split(";") if ext)
+        candidates = [executable]
+        if not os.path.splitext(executable)[1]:
+            candidates.extend(executable + ext for ext in suffixes)
+        for candidate in candidates:
+            resolved = shutil.which(candidate, path=path)
+            if resolved:
+                if executable.lower() == "python3" and "windowsapps" in resolved.lower():
+                    resolved = sys.executable
+                return [resolved, *self.command[1:]]
+        return self.command
 
     @staticmethod
-    def _signal_group(process: subprocess.Popen[str], sig: int) -> None:
+    def _signal_group(process: subprocess.Popen[str], sig: int, force: bool = False) -> None:
+        if os.name == "nt":
+            with suppress(OSError, subprocess.SubprocessError):
+                command = ["taskkill", "/PID", str(process.pid), "/T"]
+                if force:
+                    command.append("/F")
+                subprocess.run(
+                    command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            return
         try:
             os.killpg(os.getpgid(process.pid), sig)
         except (ProcessLookupError, PermissionError):
@@ -124,10 +182,12 @@ class LocalProcess:
                 process.send_signal(sig)
 
     @staticmethod
-    def _drain(pipe, sink: list[str]) -> None:
+    def _drain(pipe, sink: BoundedTextBuffer, important: ImportantJsonLineBuffer | None) -> None:
         try:
             for chunk in iter(lambda: pipe.read(READ_CHUNK_SIZE), ""):
                 sink.append(chunk)
+                if important is not None:
+                    important.append(chunk)
         except (ValueError, OSError):
             pass
         finally:

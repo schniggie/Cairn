@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Cairn 个人安全研究工作台安全研究">
+<title>Cairn · 研究工作台</title>
+<link rel="icon" href="/static/research/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/research/style.css?v=20260909-13">
+<script defer src="/static/research/reports.js?v=20260909-13"></script><script defer src="/static/research/comparison.js?v=20260909-13"></script><script defer src="/static/research/sources.js?v=20260909-13"></script><script defer src="/static/research/app.js?v=20260909-13"></script><script defer src="/static/vendor/alpine.min.js"></script>
+</head>
+<body>
+<div x-data="workbench" x-cloak @keydown.escape.window="closeLayers()" @resize.window="if(window.innerWidth>1020)evidenceOpen=false" class="shell">
+<aside class="sidebar" :class="{'mobile-visible':menuOpen}">
+  <a class="brand" href="/"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M12 6h8l3 6H9zM8 16h16l3 5H5zM5 25h22v3H5z" fill="currentColor"/></svg><span>cairn<span class="brand-dot">.</span></span></a>
+  <div class="workspace-label">PERSONAL WORKSPACE</div><nav class="app-switch" aria-label="Cairn 模式"><a href="/">CTF / 通用任务</a><a href="/research" aria-current="page">安全研究</a></nav>
+  <button class="new-button" @click="openCreate()" data-testid="new-project"><span x-html="icon('plus')"></span>新建研究<span class="shortcut">＋</span></button>
+  <div class="nav-label">研究项目 <span x-text="projects.length"></span></div>
+  <nav class="project-nav" aria-label="研究项目">
+    <template x-for="project in projects" :key="project.id">
+      <button @click="selectProject(project.id)" :class="{'active':selectedId===project.id}" :aria-current="selectedId===project.id?'page':null">
+        <span class="project-icon" x-html="icon(project.mode==='code'?'code':'layers')"></span>
+        <span class="project-nav-text"><strong x-text="project.title"></strong><small x-text="modeLabel(project.mode)"></small></span>
+        <span class="status-dot" :class="project.status"></span>
+      </button>
+    </template>
+  </nav>
+  <div class="sidebar-bottom">
+    <div class="local-connection"><span class="connection-dot"></span><div><strong>Kali 工作区</strong><small x-text="runtime.available?'Claude Code 已就绪':runtime.message"></small></div></div>
+    <button class="profile-button" @click="openScope()"><span class="avatar">你</span><span>个人研究空间<small>项目内一次授权</small></span><span x-html="icon('settings')"></span></button>
+  </div>
+</aside>
+<div class="sidebar-scrim" x-show="menuOpen" @click="menuOpen=false"></div>
+<main class="app">
+  <header class="topbar">
+    <div class="breadcrumb"><button class="icon-button mobile-menu" aria-label="打开项目列表" @click="menuOpen=true" x-html="icon('menu')"></button><span x-html="icon('compass')"></span><span>研究空间</span><span class="slash">/</span><strong x-text="current.title"></strong></div>
+    <div class="topbar-right"><span class="demo-label"><span></span>安全研究</span><a class="text-button" href="/#/vulnerability">旧版记录</a></div>
+  </header>
+  <div class="connection-error" x-show="connectionError" role="alert"><span x-text="connectionError"></span><button class="text-button" @click="refresh()">重试连接</button></div><div class="welcome-state" x-show="!current.id"><span class="eyebrow">CAIRN / SECURITY RESEARCH</span><h1 x-text="loading?'正在读取研究空间…':'从一个问题开始。'"></h1><p>给出网站、代码，或你已经搭建的环境。<br>Agent 会结合材料研究，留下可追溯的证据。</p><button class="button primary" @click="openCreate()">新建研究 <span x-html="icon('arrow')"></span></button></div><section class="project-head" x-show="current.id">
+    <div class="project-heading-row"><div class="project-title"><span class="eyebrow" x-text="'RESEARCH / '+current.id.slice(0,8)"></span><h1 x-text="current.title"></h1></div>
+    <div class="project-actions"><button class="button quiet scope-button" @click="openScope()"><span x-html="icon('shield')"></span>已授权<span class="subtle">· 本项目</span></button><button class="button" @click="togglePause()" :disabled="busy||current.status==='pause_requested'" data-testid="pause"><span x-html="icon(canResume?'play':'pause')"></span><span x-text="canResume?'继续研究':current.status==='pause_requested'?'正在暂停':'暂停'"></span></button><button class="button primary" @click="openReport()" data-testid="report"><span x-html="icon('document')"></span>研究报告</button></div></div>
+    <p class="objective" x-text="current.objective"></p>
+    <div class="material-row"><span class="mode-badge" x-text="modeLabel(current.mode)"></span><template x-if="current.url"><span class="material"><span x-html="icon('globe')"></span><span x-text="current.url"></span></span></template><template x-if="current.repo"><span class="material"><span x-html="icon('code')"></span><span x-text="current.repo"></span></span></template><span class="material detected" x-show="current.stack"><span class="tiny-dot"></span><span x-text="current.stack"></span></span></div>
+  </section>
+  <div class="workspace-grid" x-show="current.id">
+    <section class="research-pane">
+      <div class="pane-tabs" role="tablist" aria-label="研究视图">
+        <button role="tab" :aria-selected="view==='research'" @click="view='research'" :class="{selected:view==='research'}"><span x-html="icon('route')"></span>研究过程</button>
+        <button role="tab" :aria-selected="view==='findings'" @click="view='findings'" :class="{selected:view==='findings'}">发现<span class="tab-count" x-text="current.findings.length"></span></button>
+        <button role="tab" :aria-selected="view==='assets'" @click="view='assets'" :class="{selected:view==='assets'}">研究材料<span class="tab-count" x-text="current.assets.length"></span></button>
+      </div>
+      <div class="research-scroll">
+        <div x-show="view==='research'">
+          <div class="run-banner" :class="current.status"><div class="run-glyph" x-html="icon(current.status==='completed'?'check':current.status==='paused'?'pause':'activity')"></div><div><strong x-text="statusTitle"></strong><p x-text="statusDescription"></p></div><span class="live-badge" x-show="current.status==='running'">执行中</span></div>
+          <div class="route-strip" x-show="current.usage.steps>0" aria-label="当前研究阶段"><template x-for="(stage,index) in ['理解目标','建立线索','验证假设','整理结论']"><div :class="{complete:index<current.stage,current:index===current.stage}"><span x-text="index<current.stage?'✓':String(index+1).padStart(2,'0')"></span><span x-text="stage"></span></div></template></div>
+          <div class="section-caption"><span>研究记录</span><span class="subtle" x-text="current.events.length+' 条已保存记录'"></span></div>
+          <div class="timeline">
+            <template x-for="event in current.events" :key="event.id">
+              <article class="timeline-event" :class="{attention:event.kind==='warning'}">
+                <div class="event-marker" :class="event.kind" x-html="icon(event.kind==='warning'?'warning':event.kind==='hint'?'message':event.kind==='active'?'activity':'check')"></div>
+                <div class="event-body"><div class="event-heading"><strong x-text="event.title"></strong><time x-text="event.time"></time></div><p x-text="event.description"></p>
+                  <div class="event-links" x-show="event.finding"><button class="evidence-link" @click="selectFinding(event.finding,'overview')"><span x-html="icon('link')"></span><span x-text="event.linkLabel||'查看关联证据'"></span><span x-html="icon('arrow')"></span></button></div>
+                  <div class="event-links"><template x-for="id in event.evidence_ids||[]" :key="id"><button class="text-button" @click="openEvidence(id)" x-text="'查看证据 · '+id.slice(0,8)"></button></template></div><details x-show="event.trace"><summary>检查详情<span x-text="event.meta"></span></summary><pre x-text="event.trace"></pre></details>
+                </div>
+              </article>
+            </template>
+          </div>
+          <div class="next-direction"><span x-html="icon('compass')"></span><div><small x-text="current.status==='completed'?'尚未覆盖':'下一步'"></small><p x-text="current.next"></p></div></div>
+        </div>
+        <div x-show="view==='findings'" class="findings-view">
+          <div class="view-intro"><h2>有依据的结论</h2><p>保留证伪和未完成的验证，清楚区分线索与发现。</p></div>
+          <div class="filter-row"><template x-for="filter in ['全部','已证实','待验证','已排除']"><button :class="{active:filter===findingFilter}" @click="findingFilter=filter" x-text="filter"></button></template></div>
+          <template x-for="finding in filteredFindings" :key="finding.id"><button class="finding-card" :class="{active:selectedFindingId===finding.id}" @click="selectFinding(finding.id)">
+            <div class="finding-card-meta"><span class="verdict" :class="finding.state" x-text="verdictLabel(finding.state)"></span><span x-text="finding.id"></span><span class="severity" x-show="finding.state==='confirmed'" x-text="finding.severity"></span></div>
+            <h3 x-text="finding.title"></h3><p x-text="finding.summary"></p><div class="finding-card-footer"><span x-text="finding.basis"></span><span><span x-text="finding.evidence.length"></span> 份证据 <span x-html="icon('arrow')"></span></span></div>
+          </button></template>
+          <div class="empty-state" x-show="!filteredFindings.length"><span x-html="icon('search')"></span><h3>这里还没有结论</h3><p>线索需要经过检查，才能成为有依据的发现。</p></div>
+        </div>
+        <div x-show="view==='assets'" class="assets-view">
+          <div class="view-intro"><h2>研究材料</h2><p>目标、源码和运行证据，放在同一个上下文中。</p></div>
+          <section class="source-summary" x-show="current.repo||sources.length"><div><h3>源码材料</h3><p x-show="!latestSource" x-text="sourceBusy?'正在读取授权目录并固定内容…':'保存文件版本，浏览源码并保留带行号的材料记录。'"></p><template x-if="latestSource"><div><p><span x-text="latestSource.file_count+' 个文件'"></span> · <span x-text="latestSource.languages.join(' / ')||'未识别语言'"></span></p><small x-text="latestSource.stale?'当前目录已变化，旧快照仍可查阅':latestSource.status==='partial'?'部分材料已保存，存在跳过项':'采集材料已保存'"></small></div></template></div><div class="source-summary-actions"><button class="button" @click="openSources()" data-testid="source-browser">浏览源码</button><button class="text-button" @click="captureSource()" :disabled="!canCaptureSource||busy" x-text="sourceBusy?'读取中…':'保存新快照'"></button></div></section><p class="form-error" x-show="sourceError" x-text="sourceError"></p>
+          <section class="identity-summary"><div><h3>测试身份 <span class="tab-count" x-text="identityCount"></span></h3><p x-text="current.url?'为不同角色保存账号或登录态材料。导入后不会自动尝试登录。':'添加运行环境后，可以关联测试账号与登录态。'"></p></div><button class="button" @click="openIdentities()" data-testid="identities">管理身份</button></section>
+          <label class="search-field"><span x-html="icon('search')"></span><input x-model="assetSearch" placeholder="搜索路径、接口或技术…" aria-label="搜索研究材料"></label>
+          <div class="asset-list"><template x-for="asset in filteredAssets" :key="asset.name"><button @click="openAsset(asset)"><span class="asset-icon" x-html="icon(asset.type==='code'?'code':asset.type==='request'?'exchange':'globe')"></span><span><strong x-text="asset.name"></strong><small x-text="asset.detail"></small></span><span class="asset-tag" x-text="asset.label"></span><span x-html="icon('chevron')"></span></button></template></div>
+          <div class="empty-state" x-show="!filteredAssets.length"><span x-html="icon('search')"></span><h3>没有匹配的材料</h3><p>尝试其他路径或接口名称。</p></div>
+        </div>
+      </div>
+      <form class="direction-composer" @submit.prevent="sendHint()"><div class="composer-heading"><span x-html="icon('spark')"></span><span>给 Agent 一个新方向</span><span class="subtle">范围内自动继续</span></div><div class="composer-input"><input x-model="hint" maxlength="500" placeholder="例如：继续检查附件下载的权限边界…" aria-label="补充研究方向"><button class="send-button" :disabled="busy||!hint.trim()" aria-label="发送研究方向" type="submit" x-html="icon('arrowUp')"></button></div></form>
+    </section>
+    <button class="evidence-backdrop" x-show="evidenceOpen" @click="evidenceOpen=false" aria-label="关闭证据侧栏" tabindex="-1"></button>
+    <aside class="evidence-pane" :class="{'evidence-mobile-open':evidenceOpen}">
+      <div class="evidence-pane-heading"><span><span x-html="icon('panel')"></span>证据工作台</span><button class="icon-button close-evidence" @click="evidenceOpen=false" aria-label="返回研究" x-html="icon('close')"></button><span class="sample-note">已保存</span></div>
+      <template x-if="selectedFinding"><div class="evidence-content">
+        <div class="evidence-title"><div class="evidence-kicker"><span x-text="selectedFinding.id"></span><span class="verdict" :class="selectedFinding.state" x-text="verdictLabel(selectedFinding.state)"></span></div><h2 x-text="selectedFinding.title"></h2><p x-text="selectedFinding.summary"></p><div class="evidence-meta"><span x-html="icon('link')"></span><span x-text="selectedFinding.basis"></span></div></div>
+        <div class="detail-tabs"><button :class="{selected:evidenceTab==='overview'}" @click="evidenceTab='overview'">依据链</button><button x-show="selectedEvidence" :class="{selected:evidenceTab==='raw'}" @click="evidenceTab='raw'">原始证据</button></div>
+        <div class="detail-scroll"><div x-show="evidenceTab==='overview'">
+          <div class="evidence-chain"><template x-for="(e,index) in selectedFinding.evidence" :key="e.id"><button class="chain-item" @click="openEvidence(e.id)"><span class="chain-number" x-text="String(index+1).padStart(2,'0')"></span><span><small x-text="e.label"></small><strong x-text="e.title"></strong><p x-text="e.text"></p></span><span x-html="icon('chevron')"></span></button></template></div>
+          <div class="impact-block"><h3>影响与判断</h3><p x-text="selectedFinding.impact"></p></div>
+          <div class="gap-block"><span x-html="icon('info')"></span><div><strong>边界与未覆盖项</strong><p x-text="selectedFinding.gap"></p></div></div>
+        </div><template x-if="selectedEvidence&&evidenceTab==='raw'"><div><h3 x-text="selectedEvidence.title"></h3><div class="artifact-view"><div class="artifact-heading"><span class="mode-badge" x-text="evidenceLabel(selectedEvidence)"></span><button class="text-button" @click="artifactRaw=!artifactRaw" x-text="artifactRaw?'返回可读视图':'查看完整原文'"></button></div>
+<div class="code-file" x-show="codeArtifact"><span x-html="icon('code')"></span><span x-text="selectedEvidence.metadata?.path||'未记录文件路径'"></span></div>
+<div class="code-version" x-show="codeArtifact"><span>版本</span><code x-text="selectedEvidence.metadata?.commit||selectedEvidence.metadata?.sha256||'未记录，无法确认代码版本'"></code></div>
+<button class="text-button evidence-source-link" x-show="selectedEvidence.metadata?.snapshot_id" @click="inspectEvidenceSource()">查看原快照与代码上下文</button><div x-show="codeArtifact&&!artifactRaw" class="code-block"><template x-for="line in artifactLines" :key="line.key"><div class="code-line"><span class="line-number" x-text="line.n??'·'"></span><code x-text="line.text"></code></div></template></div>
+<template x-if="artifactHttp&&!artifactRaw"><div class="http-record"><div class="http-context"><span x-text="artifactHttp.method||''"></span><span x-text="artifactHttp.url||''"></span></div><div x-show="artifactHttp.request!==undefined"><div class="http-label"><strong>已保存请求</strong></div><pre class="http-code" x-text="pretty(artifactHttp.request)"></pre></div><div x-show="artifactHttp.response!==undefined"><div class="http-label"><strong>已保存响应</strong><span x-show="artifactHttp.status!==undefined" x-text="artifactHttp.status"></span></div><pre class="http-code" x-text="pretty(artifactHttp.response)"></pre></div><p class="subtle">单条记录不自动构成对照验证。结论以关联证据为准。</p></div></template>
+<pre class="http-code artifact-original" x-show="artifactRaw||(!codeArtifact&&!artifactHttp)" x-text="pretty(selectedEvidence.content)"></pre>
+<details class="artifact-details"><summary>来源与记录详情</summary><p x-text="selectedEvidence.time"></p><pre class="artifact-meta" x-text="pretty(selectedEvidence.metadata)"></pre></details></div></div></template></div>
+        <div class="evidence-footer"><button class="button" @click="requestRetest()" :disabled="busy" data-testid="retest"><span x-html="icon('refresh')"></span><span x-text="'安排复测'"></span></button><button class="button quiet" @click="openReport()"><span x-html="icon('download')"></span>导出报告</button></div>
+      </div></template>
+      <template x-if="!selectedFinding&&selectedEvidence"><div class="standalone-evidence"><h2 x-text="selectedEvidence.title"></h2><div class="artifact-view"><div class="artifact-heading"><span class="mode-badge" x-text="evidenceLabel(selectedEvidence)"></span><button class="text-button" @click="artifactRaw=!artifactRaw" x-text="artifactRaw?'返回可读视图':'查看完整原文'"></button></div>
+<div class="code-file" x-show="codeArtifact"><span x-html="icon('code')"></span><span x-text="selectedEvidence.metadata?.path||'未记录文件路径'"></span></div>
+<div class="code-version" x-show="codeArtifact"><span>版本</span><code x-text="selectedEvidence.metadata?.commit||selectedEvidence.metadata?.sha256||'未记录，无法确认代码版本'"></code></div>
+<button class="text-button evidence-source-link" x-show="selectedEvidence.metadata?.snapshot_id" @click="inspectEvidenceSource()">查看原快照与代码上下文</button><div x-show="codeArtifact&&!artifactRaw" class="code-block"><template x-for="line in artifactLines" :key="line.key"><div class="code-line"><span class="line-number" x-text="line.n??'·'"></span><code x-text="line.text"></code></div></template></div>
+<template x-if="artifactHttp&&!artifactRaw"><div class="http-record"><div class="http-context"><span x-text="artifactHttp.method||''"></span><span x-text="artifactHttp.url||''"></span></div><div x-show="artifactHttp.request!==undefined"><div class="http-label"><strong>已保存请求</strong></div><pre class="http-code" x-text="pretty(artifactHttp.request)"></pre></div><div x-show="artifactHttp.response!==undefined"><div class="http-label"><strong>已保存响应</strong><span x-show="artifactHttp.status!==undefined" x-text="artifactHttp.status"></span></div><pre class="http-code" x-text="pretty(artifactHttp.response)"></pre></div><p class="subtle">单条记录不自动构成对照验证。结论以关联证据为准。</p></div></template>
+<pre class="http-code artifact-original" x-show="artifactRaw||(!codeArtifact&&!artifactHttp)" x-text="pretty(selectedEvidence.content)"></pre>
+<details class="artifact-details"><summary>来源与记录详情</summary><p x-text="selectedEvidence.time"></p><pre class="artifact-meta" x-text="pretty(selectedEvidence.metadata)"></pre></details></div></div></template><div x-show="!selectedFinding&&!selectedEvidence" class="empty-state evidence-empty"><span x-html="icon('panel')"></span><h3>把结论放回证据中</h3><p>选择一条发现，即可查看它的源码、请求与验证依据。</p><small>执行记录会自动保存在这里。</small></div>
+    </aside>
+  </div>
+  <footer class="statusbar"><span><span class="tiny-dot"></span><span x-text="statusLabel(current.status)"></span><span class="divider">/</span><span x-text="current.events.length+' 条研究记录'"></span></span><span x-show="current.id" x-text="budgetLabel"></span></footer>
+</main>
+
+<dialog id="create-dialog" class="create-dialog" @click="if($event.target===$el)closeDialog('create-dialog')">
+<form @submit.prevent="createProject()">
+  <div class="dialog-heading"><div><span class="eyebrow">A NEW DIRECTION</span><h2>从一个问题开始。</h2></div><button type="button" class="icon-button" @click="closeDialog('create-dialog')" aria-label="关闭新建研究" x-html="icon('close')"></button></div>
+  <p class="dialog-subtitle">提供你有的材料，其余交给 Agent。</p>
+  <label class="field-label">研究名称<input x-model="draft.title" required maxlength="60" placeholder="例如：Atlas 权限边界研究"></label>
+  <label class="field-label">你想弄清什么？<textarea x-model="draft.objective" required maxlength="1000" rows="2" placeholder="描述目标、关注的行为，或希望优先检查的方向"></textarea></label>
+  <div class="materials-heading"><span>研究材料</span><small>至少提供一项，无需选择语言或工具</small></div>
+  <label class="material-field"><span x-html="icon('globe')"></span><span><strong>网站 / 运行环境</strong><input x-model="draft.url" placeholder="https://app.example.test 或本地环境地址" aria-label="网站或运行环境" maxlength="500"></span></label>
+  <label class="material-field"><span x-html="icon('code')"></span><span><strong>Kali 代码目录 / 仓库</strong><input x-model="draft.repo" placeholder="/home/kali/labs/project" aria-label="代码目录或仓库" maxlength="500"></span></label>
+  <div class="auto-mode"><span x-html="icon('spark')"></span><span x-text="draft.url&&draft.repo?'将以黑白盒联动方式研究':draft.repo?'将从代码审计开始':draft.url?'将从黑盒研究开始':'Agent 将根据材料选择研究方式'"></span></div>
+  <details class="run-limits"><summary>运行边界<span>一次授权，项目内持续有效</span></summary><p>允许读取提供的材料、调用范围内工具并运行临时验证脚本。增加范围或预算时确认变更。</p><div class="limit-fields"><label>时长（分钟）<input type="number" min="5" max="240" x-model.number="draft.minutes" required></label><label>请求上限<input type="number" min="10" max="10000" x-model.number="draft.requests" required></label><label>模型费用（美元）<input type="number" min="0.01" max="100" step="0.01" x-model.number="draft.max_cost_usd" required></label><label>研究轮次<input type="number" min="1" max="100" x-model.number="draft.max_steps" required></label></div></details>
+  <label class="consent"><input type="checkbox" x-model="draft.authorized" required><span>我确认项目目标与材料已获授权，允许 Agent 在上述边界内自主研究。</span></label>
+  <p class="form-error" x-show="formError" x-text="formError" role="alert"></p>
+  <div class="dialog-bottom"><small>由 Kali 执行，使用现有 Claude Code 配置。</small><button class="button primary" type="submit" :disabled="busy||!draft.authorized||!draft.title.trim()||!draft.objective.trim()||(!draft.url.trim()&&!draft.repo.trim())">授权并开始研究<span x-html="icon('arrow')"></span></button></div>
+</form>
+</dialog>
+
+<dialog id="source-dialog" class="source-dialog" @cancel.prevent="closeDialog('source-dialog')" @click="if($event.target===$el)closeDialog('source-dialog')">
+<div class="dialog-heading"><div><span class="eyebrow">SOURCE MATERIALS</span><h2>源码材料与版本</h2></div><button type="button" class="icon-button" aria-label="关闭源码材料" @click="closeDialog('source-dialog')" x-html="icon('close')"></button></div>
+<div class="source-toolbar"><label>已保存版本<select :value="sourceView.id" @change="selectSource($event.target.value)" aria-label="源码快照版本"><option value="" x-show="!sources.length">尚无快照</option><template x-for="snapshot in sources" :key="snapshot.id"><option :value="snapshot.id" x-text="new Date(snapshot.created_at).toLocaleString('zh-CN')+' · '+snapshot.file_count+' 文件 · '+snapshot.digest.slice(0,8)"></option></template></select></label><button class="button" @click="openComparison()" :disabled="sources.length<2||sourceBusy" data-testid="compare-sources">对照版本</button><button class="button" @click="captureSource()" :disabled="busy||!canCaptureSource" x-text="sourceBusy?'正在保存…':'保存新快照'"></button></div>
+<p class="form-error" x-show="sourceError" x-text="sourceError" role="alert"></p>
+<p x-show="sourceLoading||sourceBusy" role="status">正在处理源码材料…</p>
+<p class="snapshot-notice" x-show="sourceView.stale">当前项目已更换代码目录。这里展示旧目录的已保存内容。</p>
+<details class="source-limitations" x-show="sourceView.id"><summary><span x-text="sourceView.status==='partial'?'查看跳过项与采集限制':'查看采集范围与版本说明'"></span></summary><p x-text="sourceView.repo"></p><template x-for="limitation in sourceView.limitations"><p x-text="limitation"></p></template><p x-text="'已保存 '+sourceView.file_count+' 个文件 / '+sourceBytes(sourceView.total_bytes)"></p><p x-show="sourceView.limits.max_files" x-text="'采集上限：'+sourceView.limits.max_files+' 文件 / '+sourceBytes(sourceView.limits.max_total_bytes||0)+'；单文件 '+sourceBytes(sourceView.limits.max_file_bytes||0)+'，'+sourceView.limits.max_seconds+' 秒检查预算。'"></p><ul><template x-for="omission in sourceView.omissions"><li><code x-text="omission.path"></code> · <span x-text="omission.reason"></span></li></template></ul></details>
+<div class="source-browser-layout" x-show="sourceView.id"><aside class="source-file-pane"><label class="search-field"><span x-html="icon('search')"></span><input x-model="sourceQuery" placeholder="搜索文件路径…" aria-label="搜索源码文件"></label><div class="source-file-list"><template x-for="file in matchingSourceFiles.slice(0,200)" :key="file.path"><button type="button" @click="openSourceFile(file.path)" :class="{active:sourceFile?.path===file.path}" :title="file.path"><strong x-text="file.path"></strong><small x-text="file.language+' · '+sourceBytes(file.bytes)"></small></button></template><p class="subtle" x-show="!matchingSourceFiles.length">没有匹配的文件。</p><p class="subtle" x-show="matchingSourceFiles.length>200">当前显示前 200 个匹配文件，请搜索缩小范围。</p></div></aside>
+<section class="source-code-pane"><p x-show="sourceFileLoading">正在读取已保存内容…</p><template x-if="sourceFile"><div class="source-code-content"><div class="code-file"><span x-html="icon('code')"></span><strong x-text="sourceFile.path"></strong></div><p class="source-version-note">固定内容版本 <code x-text="sourceFile.sha256.slice(0,12)"></code> · <span x-text="sourceTextLines.length+' 行'"></span></p><div class="code-block source-code-block"><template x-for="line in sourceLines" :key="line.n"><div class="code-line" :class="{highlight:line.n>=sourceStart&&line.n<=sourceEnd}"><span class="line-number" x-text="line.n"></span><code x-text="line.text"></code></div></template></div><div class="source-pagination"><button class="text-button" @click="sourcePage(-1)" :disabled="sourceOffset===0">上一段</button><span x-text="(sourceTextLines.length?sourceOffset+1:0)+'–'+Math.min(sourceOffset+300,sourceTextLines.length)+' / '+sourceTextLines.length+' 行'"></span><button class="text-button" @click="sourcePage(1)" :disabled="sourceOffset+300>=sourceTextLines.length">下一段</button></div><form class="source-selection" @submit.prevent="preserveSource()"><label>起始行<input type="number" x-model.number="sourceStart" min="1" :max="sourceTextLines.length" aria-label="代码起始行"></label><label>结束行<input type="number" x-model.number="sourceEnd" min="1" :max="sourceTextLines.length" aria-label="代码结束行"></label><button type="button" class="text-button" @click="revealSourceSelection()">定位</button><button class="button primary" type="submit" :disabled="busy||!canPreserveSource">保留所选代码</button><small>最多 400 行，保存材料与来源，不自动生成结论。</small></form></div></template><p class="subtle" x-show="!sourceFile&&!sourceFileLoading">选择一个已保存的文件。</p></section></div>
+<p class="dialog-subtitle" x-show="!sourceView.id&&!sourceLoading">首次保存后可以浏览材料。已保存版本不会随着源目录的后续修改而变化。</p>
+</dialog>
+
+<dialog id="comparison-dialog" class="source-dialog comparison-dialog" @cancel.prevent="closeDialog('comparison-dialog')" @click="if($event.target===$el)closeDialog('comparison-dialog')">
+<div class="dialog-heading"><div><span class="eyebrow">SOURCE CHANGES</span><h2>源码版本对照</h2></div><button type="button" class="icon-button" aria-label="关闭版本对照" @click="closeDialog('comparison-dialog')" x-html="icon('close')"></button></div>
+<p class="subtle comparison-intro">对照两份已保存的材料。代码变化本身不代表问题已修复。</p>
+<div class="source-toolbar comparison-selectors"><label>基准版本<select x-model="comparisonBefore" @change="loadComparison()" aria-label="基准版本"><template x-for="s in sources" :key="s.id"><option :value="s.id" x-text="snapshotLabel(s)"></option></template></select></label><button class="text-button" @click="swapComparison()" aria-label="交换对照方向">⇄</button><label>对照版本<select x-model="comparisonAfter" @change="loadComparison()" aria-label="对照版本"><template x-for="s in sources" :key="s.id"><option :value="s.id" x-text="snapshotLabel(s)"></option></template></select></label></div>
+<p class="form-error" x-text="comparisonError" role="alert"></p><p x-show="comparisonLoading" role="status">正在对照已保存内容…</p>
+<div x-show="comparison&&!comparisonLoading"><div class="comparison-counts"><span><b x-text="comparisonView.counts.modified"></b> 内容变化</span><span><b x-text="comparisonView.counts.added"></b> 仅对照版本有</span><span><b x-text="comparisonView.counts.removed"></b> 仅基准版本有</span><span><b x-text="comparisonView.counts.unchanged"></b> 内容相同</span></div>
+<details class="source-limitations"><summary>对照范围与限制</summary><template x-for="(note,i) in comparisonView.limitations" :key="i"><p x-text="note"></p></template></details>
+<div class="source-browser-layout" x-show="comparisonView.files.length"><aside class="source-file-pane"><label class="search-field"><span x-html="icon('search')"></span><input x-model="comparisonQuery" placeholder="搜索变化的文件…" aria-label="搜索变化文件"></label><div class="source-file-list"><template x-for="file in comparisonFiles.slice(0,200)" :key="file.path"><button type="button" @click="loadComparisonFile(file.path)" :title="file.path" :class="{active:comparisonFile?.path===file.path}"><strong x-text="file.path"></strong><small x-text="comparisonLabel(file.change)"></small></button></template><p class="subtle" x-show="!comparisonFiles.length">没有匹配的变化文件。</p><p class="subtle" x-show="comparisonFiles.length>200">显示前200项，请搜索缩小范围。</p></div></aside>
+<section class="source-code-pane"><p x-show="comparisonFileLoading">正在加载文本对照…</p><template x-if="comparisonFile"><div><div class="code-file"><span x-html="icon('code')"></span><strong x-text="comparisonFile.path"></strong></div><p class="source-version-note">左列为基准行号，右列为对照行号；− 为基准内容，+ 为对照内容。</p><template x-for="(note,i) in comparisonFileNotes" :key="i"><p class="comparison-note" x-text="note"></p></template><p class="comparison-note" x-show="comparisonFile.truncated">对照未完整展开，可打开两侧原文件查阅完整内容。</p><div class="comparison-diff" role="region" aria-label="代码差异"><template x-for="(line,i) in comparisonFile.lines" :key="i"><div class="diff-line" :class="line.kind"><span class="diff-number" x-text="line.before_line??''"></span><span class="diff-number" x-text="line.after_line??''"></span><span class="diff-mark" x-text="line.kind==='added'?'+':line.kind==='removed'?'−':line.kind==='hunk'?'⋯':' '"></span><code x-text="line.text"></code><small class="diff-eol" x-show="line.eol&&line.kind!=='context'" x-text="line.eol==='none'?'无行终止符':(line.eol||'').toUpperCase()"></small></div></template></div><div class="comparison-actions"><button class="button" @click="inspectComparisonSide('before')" :disabled="!comparisonFile.before_sha256">查看基准文件</button><button class="button" @click="inspectComparisonSide('after')" :disabled="!comparisonFile.after_sha256">查看对照文件</button></div></div></template></section></div>
+<p class="comparison-empty" x-show="!comparisonView.files.length">这两份快照中已保存的文件内容相同。未采集的文件不在比较范围内。</p></div>
+</dialog>
+
+<dialog id="identity-dialog" class="identity-dialog" @cancel.prevent="closeDialog('identity-dialog')" @click="if($event.target===$el)closeDialog('identity-dialog')">
+<div class="dialog-heading"><div><span class="eyebrow">PROJECT IDENTITIES</span><h2>测试身份与登录态</h2></div><button type="button" class="icon-button" aria-label="关闭测试身份" @click="closeDialog('identity-dialog')" x-html="icon('close')"></button></div>
+<p class="dialog-subtitle">每个身份关联当前运行环境。网页只处理名称与文件名，不回显密码或令牌。</p>
+<p class="identity-condition" x-show="!current.url">先在项目材料中添加运行环境，再导入测试身份。</p>
+<p class="identity-condition" x-show="['running','pause_requested'].includes(current.status)">当前项目正在执行或停止中，请等待暂停后修改身份材料。</p>
+<p x-show="identityLoading" role="status">正在读取身份摘要…</p>
+<div class="identity-list"><template x-for="identity in identityState.items" :key="identity.id"><article class="identity-card" :data-identity-id="identity.id"><div class="identity-card-heading"><strong x-text="identity.label"></strong><span class="verdict" :class="identity.status==='active'?'confirmed':identity.status==='stale'?'pending':'rejected'" x-text="identityStatus(identity)"></span></div><p><span x-text="identityKind(identity.kind)"></span> · <span x-text="'版本 '+identity.version"></span></p><small x-text="identity.origin"></small><p class="identity-condition" x-show="identity.status==='stale'">项目环境已改变，此身份不会自动用于新环境。需要更换材料并重新关联。</p><div class="identity-card-actions"><button type="button" class="text-button" @click="replaceIdentity(identity)" :disabled="busy||!current.url||!identitiesEditable" x-text="identity.status==='revoked'?'重新导入':'更换材料'"></button><button type="button" class="text-button" @click="revokeIdentity(identity)" :disabled="busy||!identitiesEditable" x-show="identity.status!=='revoked'">撤销</button></div></article></template></div>
+<p class="subtle" x-show="!identityState.items.length&&!identityLoading">尚未添加测试身份。匿名访问和代码材料不依赖此项。</p>
+<form class="identity-import" @submit.prevent="saveIdentity()"><h3 x-text="identityDraft.id?'更换「'+identityDraft.label+'」的材料':'导入一个测试身份'"></h3>
+<label class="field-label">身份名称<input x-model="identityDraft.label" :disabled="identityDraft.id!==null" maxlength="80" placeholder="例如：普通成员 A" required autocomplete="off" aria-label="测试身份名称"></label>
+<label class="field-label">Kali 本地文件名<input x-model="identityDraft.source_file" maxlength="120" placeholder="member-a.json" required autocomplete="off" spellcheck="false" aria-label="身份材料文件名"></label>
+<p class="identity-path">文件放在 <code x-text="identityState.import_directory||'正在读取导入目录…'"></code>。只填写文件名；源文件由你保管，导入不会删除它。</p>
+<details class="identity-format"><summary>文件格式与准备方式</summary><p>目录仅当前用户可访问（700），JSON 文件仅当前用户可读写（600）。以下示例值需要替换为测试材料。</p><strong>表单账号材料</strong><pre>{"type":"account","username":"测试用户名","password":"测试密码"}</pre><strong>请求头</strong><pre>{"type":"headers","headers":{"Authorization":"Bearer 测试令牌"}}</pre><strong>Cookie</strong><pre>{"type":"cookies","cookies":{"session":"测试会话值"}}</pre></details>
+<p class="form-error" x-show="identityError" x-text="identityError" role="alert"></p>
+<div class="dialog-bottom"><button type="button" class="button quiet" x-show="identityDraft.id" @click="identityDraft={label:'',source_file:'',id:null}">取消更换</button><span class="subtle">内容在 Kali 加密保存，报告不包含身份秘密。</span><button class="button primary" type="submit" :disabled="busy||identityLoading||!current.url||!identitiesEditable||!identityDraft.label.trim()||!identityDraft.source_file.trim()" x-text="busy?'正在保存…':identityDraft.id?'保存更换':'导入身份'"></button></div>
+</form></dialog>
+
+<dialog id="scope-dialog" class="scope-dialog" @cancel.prevent="closeDialog('scope-dialog')" @click="if($event.target===$el)closeDialog('scope-dialog')">
+<div class="dialog-heading"><div><span class="eyebrow">PROJECT BOUNDARY</span><h2>一次确定，持续研究。</h2></div><button class="icon-button" aria-label="关闭授权摘要" @click="closeDialog('scope-dialog')" x-html="icon('close')"></button></div>
+<div class="scope-status"><span x-html="icon('shield')"></span>本项目已授权<span>个人模式</span></div>
+<dl class="scope-list"><dt>研究对象</dt><dd x-text="[current.url,current.repo].filter(Boolean).join(' / ')"></dd><dt>可用操作</dt><dd>读取材料、调用范围内工具、运行临时分析与验证脚本。</dd><dt>预算上限</dt><dd x-text="budgetLabel"></dd><dt>需要你介入时</dt><dd>新增范围、提高预算或缺少测试材料时，集中说明具体变化。</dd><dt>暂停与恢复</dt><dd>继续使用同一授权与预算，不要求再次批准。</dd></dl><div class="gap-block"><span x-html="icon('info')"></span><p>授权与预算由执行器检查；材料范围变更前需要暂停当前研究。</p></div><details class="run-limits"><summary>追加或更改研究材料</summary><form @submit.prevent="saveMaterials()"><label class="field-label">网站 / 运行环境<input x-model="scopeDraft.url" aria-label="更新运行环境"></label><label class="field-label">Kali 代码目录<input x-model="scopeDraft.repo" aria-label="更新代码目录"></label><label class="consent"><input type="checkbox" x-model="scopeDraft.authorized" required><span>确认上述材料的范围变更，保留现有证据与已用预算。</span></label><p class="form-error" x-text="formError" role="alert"></p><button class="button primary" :disabled="busy||!scopeDraft.authorized">保存材料变更</button></form></details><details class="run-limits"><summary>调整预算上限</summary><form @submit.prevent="saveBudget()"><p>先暂停研究。增加的额度单独确认，已用额度不会清零。</p><div class="limit-fields"><label>总时长（分钟）<input type="number" min="1" max="1440" x-model.number="budgetDraft.minutes" required></label><label>总请求上限<input type="number" min="1" max="100000" x-model.number="budgetDraft.requests" required></label><label>总费用（美元）<input type="number" min="0.01" max="1000" step="0.01" x-model.number="budgetDraft.max_cost_usd" required></label><label>总研究轮次<input type="number" min="1" max="10000" x-model.number="budgetDraft.max_steps" required></label></div><label class="consent"><input type="checkbox" x-model="budgetDraft.authorized"><span>确认本次增加的预算额度。</span></label><p class="form-error" x-text="formError" role="alert"></p><button class="button primary" :disabled="busy">保存预算</button></form></details><button class="button full-width" @click="closeDialog('scope-dialog')">返回研究</button>
+</dialog>
+
+<dialog id="report-dialog" class="report-dialog" @cancel.prevent="closeDialog('report-dialog')" @click="if($event.target===$el)closeDialog('report-dialog')">
+<div class="dialog-heading"><div><span class="eyebrow">RESEARCH BRIEF</span><h2 x-text="(reportSnapshot?reportView.title:current.title)+' · 研究报告'"></h2></div><button class="icon-button" aria-label="关闭研究报告" @click="closeDialog('report-dialog')" x-html="icon('close')"></button></div>
+<div class="report-toolbar">
+<button class="button" @click="reportHistoryOpen=!reportHistoryOpen" :aria-expanded="reportHistoryOpen">历史报告</button>
+<button class="button primary" @click="generateReport()" :disabled="reportLoading||reportGenerating" x-text="reportGenerating?'正在保存…':reportSnapshot?'生成最新快照':'生成报告快照'" data-testid="generate-report"></button>
+</div>
+<p x-show="reportLoading" role="status" x-text="reportGenerating?'正在保存报告快照…':'正在读取已保存报告…'"></p>
+<p class="form-error" x-show="reportError" x-text="reportError" role="alert"></p>
+<button class="button" x-show="reportError&&reportRetryId" @click="loadReport(reportRetryId)" :disabled="reportLoading">重试读取报告</button>
+<p class="form-error" x-show="reportHistoryError" x-text="'历史报告读取失败：'+reportHistoryError" role="alert"></p>
+<button class="button" x-show="reportHistoryError&&!reportHistoryOpen" @click="reportHistoryOpen=true;loadReportHistory(true)" :disabled="reportHistoryLoading">重试读取历史</button>
+<div class="report-history" x-show="reportHistoryOpen" aria-label="已保存的历史报告">
+<div class="section-caption"><span>已保存的版本 · 最近在前</span><button class="text-button" @click="loadReportHistory(true)" :disabled="reportHistoryLoading">刷新历史报告</button></div>
+<div class="report-history-list">
+<template x-for="item in reportHistory" :key="item.id"><button class="report-history-item" :class="{selected:reportSnapshot?.id===item.id}" :aria-pressed="reportSnapshot?.id===item.id" :data-report-id="item.id" @click="loadReport(item.id)" :disabled="reportGenerating">
+<span><time x-text="reportDate(item.created_at)"></time><small x-text="'截至第 '+item.event_seq+' 条研究记录'"></small></span><span x-text="reportSnapshot?.id===item.id?'正在查看':'查看此版本'"></span>
+</button></template>
+</div>
+<p class="subtle" x-show="reportHistoryReady&&!reportHistory.length&&!reportHistoryLoading">尚未保存报告。</p>
+<p role="status" x-show="reportHistoryLoading">正在读取历史版本…</p>
+<button class="button full-width" x-show="reportHistoryMore" @click="loadReportHistory()" :disabled="reportHistoryLoading">加载更早报告</button>
+</div>
+<p class="report-empty" x-show="reportHistoryReady&&!reportHistory.length&&!reportSnapshot&&!reportLoading&&!reportHistoryError">尚未生成报告。点击“生成报告快照”保存当前结论、证据与未覆盖项。</p>
+<div x-show="reportSnapshot"><div class="report-status"><span class="demo-label">已保存快照</span><span x-text="statusLabel(reportView.status)"></span><span x-text="reportSnapshot?new Date(reportSnapshot.created_at).toLocaleString('zh-CN'):''"></span></div>
+<p class="snapshot-notice" x-show="reportSnapshot&&current.event_seq>reportSnapshot.event_seq">研究已有更新。这份报告保留生成时的内容。<span>需要更新时，可点击上方“生成最新快照”。</span></p>
+<div class="report-body"><h3>研究目标</h3><p x-text="reportView.objective"></p><h3>结论与证据</h3><template x-for="finding in reportView.findings" :key="finding.id"><div class="report-finding"><div><span class="verdict" :class="finding.status" x-text="verdictLabel(finding.status)"></span><strong x-text="finding.title"></strong></div><p x-text="finding.description"></p><small x-text="finding.evidence_ids.join(' · ')"></small><p x-text="finding.limitations"></p></div></template><p x-show="!reportView.findings.length">尚未形成发现。请结合过程记录判断已执行与尚未检查的范围。</p><h3>边界与未覆盖项</h3><p x-text="reportView.next"></p><p x-text="reportView.limits.latest_error"></p><p class="subtle">研究结束不代表目标不存在漏洞；结论以所引用的证据和限制为准。</p><a class="text-button" :href="reportLink">此快照的固定链接</a></div>
+<div class="dialog-bottom"><button class="button" @click="finishResearch()" :disabled="busy||['running','pause_requested'].includes(current.status)" x-show="current.status!=='completed'">结束本轮研究</button><button class="button primary" @click="exportReport()" :disabled="reportLoading||!reportSnapshot"><span x-html="icon('download')"></span>导出 Markdown</button></div></div>
+</dialog>
+<div class="toast" x-show="toast" x-transition.opacity role="status"><span x-html="icon('check')"></span><span x-text="toast"></span></div>
+</div>
+</body></html>

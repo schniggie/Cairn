@@ -1,0 +1,40 @@
+# 安恒比赛平台 API 配置模板。
+# 用法:cp competition.example.yaml competition.yaml,然后填真实值。
+# 明天拿到 API 文档后,把下面 TODO 换成真实端点/认证/字段。
+
+# Cairn server 地址(也可用环境变量 CAIRN_SERVER 覆盖)
+cairn_server: "http://127.0.0.1:8000"
+
+# 安恒平台 API
+competition:
+  # 拉题接口
+  fetch:
+    url: "TODO: 拉题端点 URL"
+    method: "GET"
+    # 认证头,按平台文档填,例如:
+    # headers:
+    #   Authorization: "Bearer <token>"
+    headers: {}
+  # 提交 flag 接口
+  submit:
+    url: "TODO: 提交 flag 端点 URL"
+    method: "POST"
+    headers: {}
+    # 提交请求体如何构造:脚本会用 {challenge_id} 和 {flag} 占位替换
+    # body_template: '{"challenge_id": "{challenge_id}", "flag": "{flag}"}'
+    body_template: '{"challenge_id": "{challenge_id}", "flag": "{flag}"}'
+    # 提交成功/失败的判定:响应 JSON 里哪个字段表示"正确"
+    success_field: "TODO: 例如 correct"
+    success_value: "TODO: 例如 true"
+
+# flag 的正则(从题目导出里提取)。按安恒实际格式改。
+# 注意用单引号,反斜杠是字面量,无需转义。
+flag_regex: 'flag\{[^}]+\}'
+
+# 常驻看门狗(watchdog.py)的确定性监控配置
+watchdog:
+  interval: 30          # 巡检间隔(秒)
+  stuck_timeout: 600    # 卡住判定超时(秒):active 且持续无进展超过此值就加 hint
+  auto_submit: true     # 检测到 flag 是否自动提交
+  auto_cleanup: true    # 提交成功后是否自动清理(停 + 删容器 + 删 DB)
+

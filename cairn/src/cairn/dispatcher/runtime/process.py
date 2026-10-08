@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass
+import json
 import logging
+import socket
 import threading
 import time
 from typing import Any, Protocol, runtime_checkable
@@ -12,6 +15,120 @@ from docker.models.containers import Container
 
 LOG = logging.getLogger(__name__)
 EXEC_KILL_JOIN_TIMEOUT_SECONDS = 5.0
+STDOUT_HEAD_LIMIT = 256 * 1024
+STDOUT_TAIL_LIMIT = 8 * 1024 * 1024
+STDERR_HEAD_LIMIT = 64 * 1024
+STDERR_TAIL_LIMIT = 1024 * 1024
+IMPORTANT_LINE_LIMIT = 1024 * 1024
+TAIL_CHUNK_TARGET = 64 * 1024
+TRUNCATION_MARKER = "\n[... cairn bounded process output omitted ...]\n"
+
+
+class BoundedTextBuffer:
+    def __init__(self, head_limit: int, tail_limit: int):
+        self._head_limit = head_limit
+        self._tail_limit = tail_limit
+        self._head = ""
+        self._tail: deque[str] = deque()
+        self._tail_size = 0
+        self._truncated = False
+
+    @property
+    def chunk_count(self) -> int:
+        return len(self._tail)
+
+    def append(self, value: str) -> None:
+        if not value:
+            return
+        if len(self._head) < self._head_limit:
+            take = min(self._head_limit - len(self._head), len(value))
+            self._head += value[:take]
+            value = value[take:]
+        if not value:
+            return
+        if len(value) > self._tail_limit:
+            self._truncated = True
+            value = value[-self._tail_limit :]
+        while value:
+            if self._tail and len(self._tail[-1]) < TAIL_CHUNK_TARGET:
+                take = min(TAIL_CHUNK_TARGET - len(self._tail[-1]), len(value))
+                self._tail[-1] += value[:take]
+                self._tail_size += take
+                value = value[take:]
+                continue
+            chunk = value[:TAIL_CHUNK_TARGET]
+            self._tail.append(chunk)
+            self._tail_size += len(chunk)
+            value = value[len(chunk) :]
+        self._trim_tail()
+
+    def value(self) -> str:
+        tail = "".join(self._tail)
+        if not self._truncated:
+            return self._head + tail
+        return self._head + TRUNCATION_MARKER + tail
+
+    def __len__(self) -> int:
+        return len(self._head) + self._tail_size
+
+    def _trim_tail(self) -> None:
+        while self._tail_size > self._tail_limit:
+            overflow = self._tail_size - self._tail_limit
+            first = self._tail[0]
+            self._truncated = True
+            if overflow and len(first) > overflow:
+                self._tail[0] = first[overflow:]
+                self._tail_size -= overflow
+                continue
+            self._tail.popleft()
+            self._tail_size -= len(first)
+
+
+class ImportantJsonLineBuffer:
+    _TYPES = {"session", "turn_end", "agent_end"}
+
+    def __init__(self, line_limit: int = IMPORTANT_LINE_LIMIT):
+        self._line_limit = line_limit
+        self._pending = ""
+        self._discarding = False
+        self._session: str | None = None
+        self._completion: str | None = None
+
+    def append(self, value: str) -> None:
+        for part in value.splitlines(keepends=True):
+            if self._discarding:
+                if part.endswith(("\n", "\r")):
+                    self._discarding = False
+                continue
+            if len(self._pending) + len(part) > self._line_limit:
+                self._pending = ""
+                self._discarding = not part.endswith(("\n", "\r"))
+                continue
+            self._pending += part
+            if part.endswith(("\n", "\r")):
+                self._capture(self._pending.strip())
+                self._pending = ""
+
+    def value(self) -> str:
+        if self._pending:
+            self._capture(self._pending.strip())
+            self._pending = ""
+        return "\n".join(line for line in (self._session, self._completion) if line)
+
+    def _capture(self, line: str) -> None:
+        if not line or '"type"' not in line:
+            return
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        event_type = payload.get("type") if isinstance(payload, dict) else None
+        if event_type not in self._TYPES:
+            return
+        if event_type == "session" and self._session is None:
+            self._session = line
+        elif event_type in {"turn_end", "agent_end"}:
+            self._completion = line
 
 
 @dataclass(slots=True)
@@ -42,15 +159,17 @@ class ExecProcess(Protocol):
 
 
 class ManagedProcess:
-    def __init__(self, container: Container, command: list[str], env: dict[str, str]):
+    def __init__(self, container: Container, command: list[str], env: dict[str, str], *, stdin: str | None = None):
         self.command = command
         self.env = env
+        self.stdin = stdin
         self._container = container
         self._api = container.client.api
         self._exec_id: str | None = None
         self._reader: threading.Thread | None = None
-        self._stdout: list[str] = []
-        self._stderr: list[str] = []
+        self._stdout = BoundedTextBuffer(STDOUT_HEAD_LIMIT, STDOUT_TAIL_LIMIT)
+        self._stderr = BoundedTextBuffer(STDERR_HEAD_LIMIT, STDERR_TAIL_LIMIT)
+        self._important_stdout = ImportantJsonLineBuffer()
         self._returncode: int | None = None
         self._timed_out = False
         self._cancel_reason: str | None = None
@@ -63,12 +182,13 @@ class ManagedProcess:
             self.command,
             stdout=True,
             stderr=True,
-            stdin=False,
+            stdin=self.stdin is not None,
             tty=False,
             environment=self.env,
         )
         self._exec_id = exec_info["Id"]
-        self._reader = threading.Thread(target=self._read_stream, daemon=True)
+        target = self._read_stream if self.stdin is None else self._read_socket_stream
+        self._reader = threading.Thread(target=target, daemon=True)
         self._reader.start()
 
     def communicate(self, timeout: float | None) -> ProcessResult:
@@ -83,12 +203,16 @@ class ManagedProcess:
                 self._returncode = 137
             self._done.set()
         self._done.wait(timeout=0)
-        if self._read_error and not self._stderr:
+        if self._read_error and not len(self._stderr):
             self._stderr.append(self._read_error)
+        stdout = self._stdout.value()
+        important = self._important_stdout.value()
+        if important:
+            stdout += "\n" + important + "\n"
         return ProcessResult(
             returncode=self._returncode if self._returncode is not None else 1,
-            stdout="".join(self._stdout),
-            stderr="".join(self._stderr),
+            stdout=stdout,
+            stderr=self._stderr.value(),
             timed_out=self._timed_out,
             cancelled=self._cancel_reason is not None,
             cancel_reason=self._cancel_reason,
@@ -130,6 +254,7 @@ class ManagedProcess:
                 stdout, stderr = self._split_chunk(chunk)
                 if stdout:
                     self._stdout.append(stdout)
+                    self._important_stdout.append(stdout)
                 if stderr:
                     self._stderr.append(stderr)
         except DockerException as exc:
@@ -152,6 +277,79 @@ class ManagedProcess:
         if callable(response_close):
             with suppress(Exception):
                 response_close()
+
+    def _read_socket_stream(self) -> None:
+        assert self._exec_id is not None
+        sock: Any | None = None
+        try:
+            sock = self._api.exec_start(
+                self._exec_id,
+                detach=False,
+                tty=False,
+                socket=True,
+            )
+            self._set_socket_timeout(sock, None)
+            self._send_stdin(sock)
+            self._read_multiplexed_socket(sock)
+        except DockerException as exc:
+            self._read_error = str(exc)
+        except OSError as exc:
+            self._read_error = str(exc)
+        finally:
+            if sock is not None:
+                self._close_socket_response(sock)
+                with suppress(OSError, ValueError):
+                    sock.close()
+            self._returncode = self._resolve_exit_code()
+            self._done.set()
+
+    def _send_stdin(self, sock: Any) -> None:
+        data = (self.stdin or "").encode("utf-8")
+        if data:
+            self._raw_socket(sock).sendall(data)
+        try:
+            self._raw_socket(sock).shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+    def _read_multiplexed_socket(self, sock: Any) -> None:
+        buffer = b""
+        while True:
+            raw_sock = self._raw_socket(sock)
+            chunk = raw_sock.recv(4096)
+            if not chunk:
+                return
+            buffer += chunk
+            while len(buffer) >= 8:
+                stream_type = buffer[0]
+                frame_size = int.from_bytes(buffer[4:8], byteorder="big")
+                if len(buffer) < 8 + frame_size:
+                    break
+                payload = buffer[8 : 8 + frame_size]
+                buffer = buffer[8 + frame_size :]
+                if stream_type == 1:
+                    text = self._decode(payload)
+                    self._stdout.append(text)
+                    self._important_stdout.append(text)
+                elif stream_type == 2:
+                    self._stderr.append(self._decode(payload))
+
+    @staticmethod
+    def _raw_socket(sock: Any) -> Any:
+        return getattr(sock, "_sock", sock)
+
+    @staticmethod
+    def _set_socket_timeout(sock: Any, timeout: float | None) -> None:
+        raw_sock = ManagedProcess._raw_socket(sock)
+        if hasattr(raw_sock, "settimeout"):
+            raw_sock.settimeout(timeout)
+
+    @staticmethod
+    def _close_socket_response(sock: Any) -> None:
+        response = getattr(sock, "_response", None)
+        if response is not None:
+            with suppress(Exception):
+                response.close()
 
     def _resolve_exit_code(self) -> int:
         assert self._exec_id is not None
