@@ -258,7 +258,7 @@ server 侧先做**便宜又高价值**的：去重、`id` 分配、`code_version
     }
     ```
 
-    `credentials_ref` 是**引用不是明文**（凭证走 secret 存储）；`allowlist` 直接喂 harness 出站围栏。Codebase / Goal-Run 是否拆表仍是开放问题，但 origin 结构化不再等它。
+    `credentials_ref` 是**引用不是明文**（凭证走 secret 存储）。未带凭证时 `allowlist` 仍喂 harness；带凭证时出站 base_url 与 allowlist 取自 dispatcher 的 `target_credentials` 绑定，Origin 只能点名已批准的 id。Codebase / Goal-Run 是否拆表仍是开放问题，但 origin 结构化不再等它。
 
 10. **`verify` 是真·第四任务类型，不是打了标记的 explore（新拍板）。** 现 `TaskType = reason | explore | bootstrap`，`TasksConfig` 亦然。verify 的超时、container profile、emit schema 都与 explore 不同（见决策 #8、#11），塞进 explore 靠标记区分会把两套 gating 混进一个状态机。因此：新增 `TaskType: verify`；Intent 结构保持通用（用 `description` / PoC Brief payload 区分业务语义）；`WorkerConfig.task_types` 可含 `verify`，并新增 `capabilities: [static_fs | live_http | browser]` 字段，`worker_select` 据此路由（现只看 priority / running）。这坐实"调度非基本不动"。
 

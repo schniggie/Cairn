@@ -24,7 +24,7 @@ from cairn.dispatcher.workers.registry import get_driver
 from cairn.dispatcher.tasks.bootstrap import run_bootstrap_task
 from cairn.dispatcher.tasks.explore import run_explore_task
 from cairn.dispatcher.tasks.reason import run_reason_task
-from cairn.dispatcher.tasks.verify import run_verify_task
+from cairn.dispatcher.tasks.verify import project_requests_credential, run_verify_task, verify_may_run
 from cairn.server.models import Intent, ProjectDetail, ProjectSummary
 
 LOG = logging.getLogger(__name__)
@@ -407,13 +407,15 @@ class DispatcherLoop:
             and not self._is_bootstrap_intent(intent)
             and intent.concluded_as == "stale"
         ]
+        credential_requested = project_requests_credential(project)
         verify_ready = [
             intent
             for intent in fresh_intents
             if self._is_verify_intent(intent)
-            and (
-                not self.config.tasks.verify.require_fire_approval
-                or intent.fire_status in ("approved", "fired")
+            and verify_may_run(
+                self.config.tasks.verify.require_fire_approval,
+                intent.fire_status,
+                credential_requested,
             )
         ]
         fresh_intents = [intent for intent in fresh_intents if not self._is_verify_intent(intent)]

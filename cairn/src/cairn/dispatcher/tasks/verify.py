@@ -10,7 +10,7 @@ from cairn.dispatcher.harness import (
     AllowlistFence,
     execute_allowed_request,
     harness_result_to_observations,
-    resolve_credentials_ref,
+    resolve_target_credential,
     select_verifies_target,
 )
 from cairn.dispatcher.protocol.client import CairnClient
@@ -51,16 +51,44 @@ def run_verify_task(
             best_effort_release(client, project.project.id, intent.id, worker.name)
             return "killed"
 
-        require_approval = config.tasks.verify.require_fire_approval
-        if require_approval and intent.fire_status not in ("approved", "fired"):
+        brief = _brief_dict(intent)
+        origin_desc = next((f.description for f in project.facts if f.id == "origin"), None)
+        credential_ref = _origin_credentials_ref(origin_desc)
+        if not verify_may_run(
+            config.tasks.verify.require_fire_approval,
+            intent.fire_status,
+            bool(credential_ref),
+        ):
             # should be filtered pre-claim; still fail-closed
             best_effort_release(client, project.project.id, intent.id, worker.name)
             return "awaiting_approval"
 
-        brief = _brief_dict(intent)
-        origin_desc = next((f.description for f in project.facts if f.id == "origin"), None)
-        allowlist = _origin_allowlist(origin_desc)
-        base_url = _origin_base_url(origin_desc) or ""
+        extra_denied: list[str] = []
+        if config.safety is not None:
+            extra_denied.append(config.safety.token_env)
+        if config.auth is not None:
+            extra_denied.append(config.auth.helper_token_env)
+        resolution = resolve_target_credential(
+            credential_ref,
+            config.target_credentials,
+            origin_base_url=_origin_base_url(origin_desc),
+            extra_denied_envs=extra_denied,
+        )
+        if resolution.error:
+            LOG.error(
+                "verify credential refused project=%s intent=%s reason=%s",
+                project.project.id,
+                intent.id,
+                resolution.error,
+            )
+            best_effort_release(client, project.project.id, intent.id, worker.name)
+            return "failed"
+        if resolution.attached:
+            allowlist = list(resolution.allowlist)
+            base_url = resolution.base_url or ""
+        else:
+            allowlist = _origin_allowlist(origin_desc)
+            base_url = _origin_base_url(origin_desc) or ""
         endpoint = _brief_endpoint(brief)
         fence = AllowlistFence(entries=allowlist)
 
@@ -91,7 +119,7 @@ def run_verify_task(
                 LOG.error("verify codebase mount rejected project=%s error=%s", project.project.id, exc)
                 best_effort_release(client, project.project.id, intent.id, worker.name)
                 return "failed"
-        creds_env = resolve_credentials_ref(_origin_credentials_ref(origin_desc))
+        creds_env = dict(resolution.env)
         # verify profile: short-lived, credentials only here, codebase RO
         verify_container = container_manager.ensure_running(
             project.project.id,
@@ -465,6 +493,29 @@ def _origin_codebase_path(origin_description: str | None) -> str | None:
         if isinstance(path, str) and path.strip():
             return path.strip()
     return None
+
+
+def verify_may_run(
+    require_fire_approval: bool,
+    fire_status: str | None,
+    credential_requested: bool,
+) -> bool:
+    """Credentialed verifies stay behind admin fire approval.
+
+    Turning ``require_fire_approval`` off does not let a named target credential
+    leave the dispatcher before ``POST .../fire`` approves the intent.
+    """
+    approved = fire_status in ("approved", "fired")
+    if credential_requested and not approved:
+        return False
+    if require_fire_approval and not approved:
+        return False
+    return True
+
+
+def project_requests_credential(project: ProjectDetail) -> bool:
+    origin = next((fact.description for fact in project.facts if fact.id == "origin"), None)
+    return bool(_origin_credentials_ref(origin))
 
 
 def _origin_credentials_ref(origin_description: str | None) -> str | None:

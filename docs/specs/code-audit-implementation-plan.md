@@ -161,7 +161,7 @@
 ### P2.5 harness 与合规围栏（合规章节 1–4，决策 #9）
 - [x] **强制围栏**：`execute_allowed_request` allowlist 空=fail-closed；越界不 open socket；开火前/后 `proxy_traffic` 记账。
 - [x] fire 审批：未 approve 不 claim；kill-switch：cancel + 毁容器 + 拒新 claim。
-- [x] `credentials_ref`→`secret:`/`env:` 解析注入 verify env（非明文落图）。
+- [x] `credentials_ref` 只命名 dispatch `target_credentials` 里的 id（裸 id 或 `secret:<id>`）。环境变量名、base_url、allowlist 来自该绑定；Origin 目标不一致则不附带凭证。`env:VAR` 不再解析。
 - [ ] **仍弱**：无独立 mitm 代理进程；`proxy_url` 可选注入 urllib ProxyHandler，不是透明审计网关。
 
 ### P2.6 测试
@@ -197,7 +197,7 @@
   - **代码库路径**（必填，host 侧绝对路径，即跑 dispatcher 那台机器能 bind 的路径）
   - **commit**（可选）
   - **测试站 base_url**（要做 verify 时必填）
-  - **credentials_ref**（可选，`secret:NAME` / `env:VAR`）
+  - **credentials_ref**（可选，operator-approved id 或 `secret:<id>`；不接受 `env:VAR`）
   - **allowlist**（多行/标签；默认从 base_url 解析 host:port 预填）
   - **goal**（沿用）
 - [x] 提交时拼成 origin JSON（与决策 #9 形状一致），不再让用户手写整坨 JSON。

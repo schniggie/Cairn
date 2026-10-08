@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from cairn.dispatcher.harness import (
     AllowlistFence,
     execute_allowed_request,
-    resolve_credentials_ref,
+    resolve_target_credential,
 )
 from cairn.server import db
 from cairn.server.app import app
@@ -213,9 +213,38 @@ def test_e2e_flaskish_target_to_poc_confirmed(client: TestClient, rce_server, tm
 
 
 def test_credentials_ref_resolution(monkeypatch):
-    monkeypatch.setenv("CAIRN_SECRET_demo", "s3cret")
-    env = resolve_credentials_ref("secret:demo")
-    assert env["CAIRN_TARGET_CREDENTIAL"] == "s3cret"
+    monkeypatch.setenv("CAIRN_SECRET_demo", "derived-name")
+    monkeypatch.setenv("CAIRN_SECRET_DEMO", "s3cret")
     monkeypatch.setenv("MY_TOKEN", "abc")
-    env2 = resolve_credentials_ref("env:MY_TOKEN")
-    assert env2["MY_TOKEN"] == "abc"
+    monkeypatch.setenv("CAIRN_ADMIN_TOKEN", "admin-token")
+
+    class _Binding:
+        id = "demo"
+        env = "CAIRN_SECRET_DEMO"
+        base_url = "http://127.0.0.1:18080"
+        allowlist = ["127.0.0.1:18080"]
+
+    resolved = resolve_target_credential(
+        "secret:demo",
+        [_Binding()],
+        origin_base_url="http://127.0.0.1:18080",
+    )
+    assert resolved.attached is True
+    assert resolved.env["CAIRN_TARGET_CREDENTIAL"] == "s3cret"
+    assert "derived-name" not in resolved.env.values()
+
+    refused = resolve_target_credential(
+        "env:MY_TOKEN",
+        [_Binding()],
+        origin_base_url="http://127.0.0.1:18080",
+    )
+    assert refused.attached is False
+    assert refused.env == {}
+    assert "abc" not in refused.env.values()
+    stolen = resolve_target_credential(
+        "env:CAIRN_ADMIN_TOKEN",
+        [_Binding()],
+        origin_base_url="http://127.0.0.1:18080",
+    )
+    assert stolen.attached is False
+    assert "admin-token" not in stolen.env.values()

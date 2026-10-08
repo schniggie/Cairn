@@ -2,9 +2,10 @@
 
 Plain reads of ``/projects``, ``/skills``, and ``/engines`` stay open when
 ``CAIRN_ADMIN_TOKEN`` is unset so local development can list data. Routes that
-send stored credentials, change where those credentials go, or write files
-outside a normal project create refuse every request until a token is
-configured and presented. Same-origin checks are not authentication.
+send stored credentials, change where those credentials go, approve a verify
+that can attach one, or write files outside a normal project create refuse
+every request until a token is configured and presented. Same-origin checks
+are not authentication.
 """
 
 from __future__ import annotations
@@ -43,10 +44,20 @@ def _skill_mutation(path: str, method: str) -> bool:
     return path == "/skills" or path.startswith("/skills/")
 
 
+def _verify_fire(path: str, method: str) -> bool:
+    """Approving a verify intent can attach an operator credential on the next run."""
+    if method.upper() != "POST":
+        return False
+    parts = [part for part in path.split("/") if part]
+    return len(parts) == 5 and parts[0] == "projects" and parts[2] == "intents" and parts[4] == "fire"
+
+
 def fails_closed(path: str, method: str = "GET") -> bool:
     if any(path == prefix or path.startswith(prefix + "/") for prefix in _FAIL_CLOSED_PREFIXES):
         return True
     if (method.upper(), path) in _CTF_FAIL_CLOSED:
+        return True
+    if _verify_fire(path, method):
         return True
     return _skill_mutation(path, method)
 

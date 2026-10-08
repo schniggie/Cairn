@@ -143,6 +143,12 @@ Merging either alternative PR only adds the upstream source under `integrations/
 - Ghidra in the worker image increases build time and image size; the download URL can move.
 - Chrome DevTools wrapper is not installed in the image until `chrome-devtools-mcp` is added to the Dockerfile.
 
+## Verify target credentials
+
+Project Origin may name an operator-approved credential id (`demo` or `secret:demo`). The environment variable, base URL, and allowlist come from `target_credentials` in the dispatch config. If Origin's target URL does not match that binding, the harness does not attach the credential. `env:VAR` is not resolved. `CAIRN_ADMIN_TOKEN`, `CAIRN_SAFETY_TOKEN`, and `CAIRN_AUTH_HELPER_TOKEN` cannot be target credentials. `POST /projects/{id}/intents/{id}/fire` requires the admin bearer and returns 403 when `CAIRN_ADMIN_TOKEN` is unset.
+
+A verify with no `credentials_ref` still uses Origin's URL and allowlist and does not attach a dispatcher secret.
+
 ## Known residual risk: CTF prompt injection and worker egress
 
 Platform text is labeled untrusted and Claude Code 2.1.98 tool subprocesses scrub provider credentials, but this is not a complete containment boundary.

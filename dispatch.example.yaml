@@ -55,6 +55,18 @@ tasks:
     # Time budget for conclude fallback used to summarize confirmed findings from the same session.
     conclude_timeout: 90
 
+# Operator-bound verify credentials. A project origin may name an id
+# (`demo` or `secret:demo`). The harness reads `env` from the dispatcher
+# process and sends that value only to this base_url, using this allowlist.
+# CAIRN_ADMIN_TOKEN, CAIRN_SAFETY_TOKEN, and CAIRN_AUTH_HELPER_TOKEN are rejected.
+# Omit the list when verify should not attach a bearer token.
+# target_credentials:
+#   - id: demo
+#     env: CAIRN_SECRET_DEMO
+#     base_url: "http://127.0.0.1:18080"
+#     allowlist:
+#       - "127.0.0.1:18080"
+
 container:
   # Base worker container. The dispatcher execs agent commands inside one container per project.
   image: "ghcr.io/oritera/cairn-worker-container:latest"

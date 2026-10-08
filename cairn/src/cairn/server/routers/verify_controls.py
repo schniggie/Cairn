@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from cairn.server.admin_auth import require_admin
 from cairn.server.db import get_conn
 from cairn.server.models import (
     FireApprovalRequest,
@@ -52,6 +53,7 @@ def clear_kill(project_id: str):
 @router.post(
     "/projects/{project_id}/intents/{intent_id}/fire",
     response_model=Intent,
+    dependencies=[Depends(require_admin)],
 )
 def fire_approval(project_id: str, intent_id: str, body: FireApprovalRequest):
     with get_conn() as conn:

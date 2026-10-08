@@ -6,6 +6,7 @@ from importlib import resources
 import os
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -28,6 +29,25 @@ RESERVED_RUNTIME_ENV_KEYS = frozenset(
         "CAIRN_PHASE",
     }
 )
+
+# Dispatcher process secrets. A target credential mapping must not name these,
+# even when an operator writes the env var into dispatch config.
+DENIED_TARGET_ENVS = frozenset(
+    {
+        "CAIRN_ADMIN_TOKEN",
+        "CAIRN_SAFETY_TOKEN",
+        "CAIRN_AUTH_HELPER_TOKEN",
+    }
+)
+
+
+def is_denied_target_env(name: str) -> bool:
+    key = name.strip().upper()
+    if not key:
+        return True
+    if key in DENIED_TARGET_ENVS:
+        return True
+    return key.startswith("CAIRN_SAFETY_")
 
 WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
     "claudecode": (
@@ -172,6 +192,52 @@ class VerifyTaskConfig(BaseModel):
     force_harness: bool = True
     allow_model_instantiate: bool = False
     proxy_url: str | None = None
+
+
+class TargetCredentialConfig(BaseModel):
+    """Operator binding for one verify bearer token.
+
+    Project Origin may name ``id`` (or ``secret:<id>``). The environment variable,
+    destination, and allowlist come from this object, not from Origin.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    env: str = Field(min_length=1)
+    base_url: str = Field(min_length=1)
+    allowlist: list[str] = Field(min_length=1)
+
+    @field_validator("id", "env", "base_url")
+    @classmethod
+    def strip_required(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("must not be blank")
+        return text
+
+    @field_validator("env")
+    @classmethod
+    def reject_internal_env(cls, value: str) -> str:
+        if is_denied_target_env(value):
+            raise ValueError("dispatcher-internal secrets cannot be target credentials")
+        return value
+
+    @field_validator("base_url")
+    @classmethod
+    def require_http_url(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("base_url must be an http(s) URL")
+        return value
+
+    @field_validator("allowlist")
+    @classmethod
+    def clean_allowlist(cls, value: list[str]) -> list[str]:
+        cleaned = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+        if not cleaned:
+            raise ValueError("allowlist must not be empty")
+        return cleaned
 
 
 class TasksConfig(BaseModel):
@@ -369,6 +435,7 @@ class DispatchConfig(BaseModel):
     safety: SafetyConfig | None = None
     common_env: dict[str, str] = Field(default_factory=dict)
     auth: AuthConfig | None = None
+    target_credentials: list[TargetCredentialConfig] = Field(default_factory=list)
     workers: list[WorkerConfig]
 
     @model_validator(mode="before")
@@ -435,6 +502,21 @@ class DispatchConfig(BaseModel):
         else:  # local: workers reuse the host CLI config, so no LLM env keys are required
             if self.local is None:
                 self.local = LocalConfig()
+        return self
+
+    @model_validator(mode="after")
+    def validate_target_credentials(self) -> "DispatchConfig":
+        ids = [item.id for item in self.target_credentials]
+        if len(ids) != len(set(ids)):
+            raise ValueError("target_credentials ids must be unique")
+        denied: set[str] = set()
+        if self.safety is not None and self.safety.token_env.strip():
+            denied.add(self.safety.token_env.strip().upper())
+        if self.auth is not None and self.auth.helper_token_env.strip():
+            denied.add(self.auth.helper_token_env.strip().upper())
+        for item in self.target_credentials:
+            if item.env.upper() in denied:
+                raise ValueError(f"target credential {item.id} env is a dispatcher-internal secret")
         return self
 
     @model_validator(mode="after")

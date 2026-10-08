@@ -6,8 +6,10 @@ import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 from urllib.parse import urlparse
+
+from cairn.dispatcher.config import is_denied_target_env
 
 
 WhyFailedReason = Literal[
@@ -71,7 +73,7 @@ class AllowlistFence:
             response=None,
             why_failed={
                 "reason": "allowlist_blocked",
-                "detail": f"target {target!r} not in origin.allowlist",
+                "detail": f"target {target!r} not in allowlist",
             },
         )
 
@@ -435,25 +437,98 @@ def execute_allowed_request(
     )
 
 
-def resolve_credentials_ref(credentials_ref: str | None) -> dict[str, str]:
-    """Resolve credentials_ref into env inject map. Supports:
-    - secret:NAME → env CAIRN_SECRET_NAME or CAIRN_SECRET_<NAME>
-    - env:VAR → os.environ[VAR]
-    Never returns the ref string itself as a secret value.
+@dataclass(frozen=True, slots=True)
+class ResolvedTargetCredential:
+    """Result of resolving a project credential id against operator bindings.
+
+    ``requested`` means Origin named a credential. ``attached`` means the secret
+    may be sent, and only to ``base_url`` under ``allowlist``. On any refusal
+    ``env`` is empty and ``error`` is set.
     """
-    if not credentials_ref or not credentials_ref.strip():
-        return {}
-    ref = credentials_ref.strip()
-    if ref.startswith("env:"):
-        var = ref[4:].strip()
-        val = os.environ.get(var)
-        return {var: val} if val is not None else {}
-    if ref.startswith("secret:"):
-        name = ref[7:].strip()
-        for key in (f"CAIRN_SECRET_{name}", f"CAIRN_SECRET_{name.upper()}", name):
-            val = os.environ.get(key)
-            if val is not None:
-                return {"CAIRN_TARGET_CREDENTIAL": val, "CAIRN_CREDENTIALS_REF": ref}
-        return {"CAIRN_CREDENTIALS_REF": ref}
-    # unknown scheme: pass ref only, not a secret body
-    return {"CAIRN_CREDENTIALS_REF": ref}
+
+    requested: bool
+    attached: bool
+    env: dict[str, str]
+    base_url: str | None
+    allowlist: tuple[str, ...]
+    error: str | None
+
+
+def destination_key(url: str | None) -> str | None:
+    """Normalize an http(s) origin so host, port, and path can be compared."""
+    if not url or not str(url).strip():
+        return None
+    parsed = urlparse(str(url).strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return None
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    port = parsed.port
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    path = parsed.path.rstrip("/")
+    return f"{parsed.scheme}://{host}:{port}{path}"
+
+
+def _credential_id(credentials_ref: str) -> tuple[str | None, str | None]:
+    """Return ``(id, error)``. ``env:`` never selects an environment variable."""
+    scheme, sep, rest = credentials_ref.partition(":")
+    if sep and scheme.lower() == "env":
+        return None, "project origin cannot name an environment variable"
+    if sep and scheme.lower() == "secret":
+        credential_id = rest.strip()
+        if not credential_id:
+            return None, "unknown target credential"
+        return credential_id, None
+    return credentials_ref, None
+
+
+def resolve_target_credential(
+    credentials_ref: str | None,
+    bindings: Sequence[Any],
+    *,
+    origin_base_url: str | None,
+    extra_denied_envs: Sequence[str] = (),
+) -> ResolvedTargetCredential:
+    """Resolve a project credential id using operator bindings only.
+
+    Origin may name an approved id (``demo`` or ``secret:demo``). The environment
+    variable name is read from the binding. ``env:VAR`` is refused. Dispatcher
+    secrets such as ``CAIRN_ADMIN_TOKEN`` and ``CAIRN_SAFETY_TOKEN`` are never read.
+    """
+    empty = ResolvedTargetCredential(False, False, {}, None, (), None)
+    if credentials_ref is None or not str(credentials_ref).strip():
+        return empty
+    credential_id, error = _credential_id(str(credentials_ref).strip())
+    if error:
+        return ResolvedTargetCredential(True, False, {}, None, (), error)
+    assert credential_id is not None
+    match = next((item for item in bindings if str(item.id) == credential_id), None)
+    if match is None:
+        return ResolvedTargetCredential(True, False, {}, None, (), "unknown target credential")
+
+    env_name = str(match.env).strip()
+    denied = {name.strip().upper() for name in extra_denied_envs if name and str(name).strip()}
+    if is_denied_target_env(env_name) or env_name.upper() in denied:
+        return ResolvedTargetCredential(
+            True, False, {}, None, (), "target credential env is a dispatcher-internal secret"
+        )
+    if destination_key(origin_base_url) != destination_key(str(match.base_url)):
+        return ResolvedTargetCredential(
+            True, False, {}, None, (), "origin target does not match the credential destination"
+        )
+    allowlist = tuple(str(item).strip() for item in match.allowlist if str(item).strip())
+    if not allowlist:
+        return ResolvedTargetCredential(True, False, {}, None, (), "target credential allowlist is empty")
+    value = os.environ.get(env_name)
+    if not value:
+        return ResolvedTargetCredential(True, False, {}, None, (), "target credential is not set")
+    return ResolvedTargetCredential(
+        True,
+        True,
+        {"CAIRN_TARGET_CREDENTIAL": value, "CAIRN_CREDENTIALS_REF": credential_id},
+        str(match.base_url).strip(),
+        allowlist,
+        None,
+    )
