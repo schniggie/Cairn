@@ -34,6 +34,9 @@ jobs:
           version: "0.8.9"
           enable-cache: false
 
+      - name: Install bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+
       - name: Run Python test suite
         working-directory: cairn
         run: uv run --group dev pytest -q
