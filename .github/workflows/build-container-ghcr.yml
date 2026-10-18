@@ -2,6 +2,13 @@ name: Build And Publish Container
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - "container/**"
+      - "cairn/**"
+      - "docker-compose.yaml"
+      - "dispatch*.yaml"
+      - ".github/workflows/build-container-ghcr.yml"
   push:
     branches:
       - main
@@ -35,7 +42,21 @@ jobs:
           enable-cache: false
 
       - name: Install bubblewrap
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          # Ubuntu 24.04 runners set kernel.apparmor_restrict_unprivileged_userns=1.
+          # unshare(CLONE_NEWUSER) succeeds, but the new namespace cannot write
+          # uid_map, so bwrap fails with "setting up uid map: Permission denied".
+          # Allow unprivileged user namespaces for this job, then prove the same
+          # --unshare-all sandbox the research worker uses can actually start.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          if [ -e /proc/sys/kernel/unprivileged_userns_clone ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          bwrap --unshare-all --die-with-parent --ro-bind / / --proc /proc --dev /dev /usr/bin/true
 
       - name: Run Python test suite
         working-directory: cairn
@@ -48,6 +69,7 @@ jobs:
         run: python -c "import glob,zipfile; p=glob.glob('cairn/dist/*.whl')[0]; n=zipfile.ZipFile(p).namelist(); assert any(x.endswith('safety/pi_extension/index.ts') for x in n); assert any(x.endswith('safety/pi_extension/transport.mjs') for x in n)"
 
   docker:
+    if: github.event_name != 'pull_request'
     needs: test
     runs-on: ubuntu-latest
     permissions:
