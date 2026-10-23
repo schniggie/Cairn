@@ -1123,7 +1123,8 @@ def test_egress_env_fails_loud_when_enforcement_unavailable(monkeypatch, tmp_pat
 def test_egress_env_establishes_enforcement_and_model_gateway(monkeypatch, tmp_path):
     """M1收尾: a real-target run gets a scoped egress proxy + LD_PRELOAD; the model
     gateway is classified as model traffic (allowed, not quota), the target is allowed,
-    and any other host is refused (no silent allow)."""
+    and any other host is refused (no silent allow). A stand-in CAIRN_CLAUDE_BIN does
+    not skip the bridge."""
     import cairn.server.research_egress as eg
     def _fake_build(out_dir=None):
         d = Path(out_dir) if out_dir else Path("/tmp")
@@ -1131,20 +1132,23 @@ def test_egress_env_establishes_enforcement_and_model_gateway(monkeypatch, tmp_p
         (d / "libcairn_egress.so").write_bytes(b"ELF")
         return str(d / "libcairn_egress.so")
     monkeypatch.setattr(eg, "build_egress_preload", _fake_build)
-    monkeypatch.delenv("CAIRN_CLAUDE_BIN", raising=False)
+    monkeypatch.setenv("CAIRN_CLAUDE_BIN", "/tmp/not-a-real-claude")
     w = ResearchWorker(db_path=tmp_path / "r.db", workspace_root=tmp_path / "ws", worker_id="w-eg2")
     session = {"url": "http://target.example:80", "authorization": {}}
     config_root = tmp_path / "private"
     proxy, env = w._egress_environment(session, 10, config_root=config_root)
     try:
-        # interceptor is compiled into the private claude-config dir and referenced by
-        # its SANDBOX path (the dir is RO-bound at /claude-config) — a host /tmp path
-        # would be invisible inside bwrap. LD_PRELOAD is injected INSIDE by bwrap
-        # --setenv, not in the outer env (outer LD_PRELOAD breaks bwrap's user-ns helper).
-        assert w._egress_preload_path == "/claude-config/libcairn_egress.so"
-        assert (config_root / "claude-config-runtime" / "libcairn_egress.so").is_file()
+        # The library is staged into the read-only egress mount and referenced by
+        # its sandbox path. LD_PRELOAD is injected inside bwrap, not in the outer
+        # env (outer LD_PRELOAD breaks bwrap's user-namespace helper).
+        assert w._egress_preload_path == "/cairn-egress/libcairn_egress.so"
+        assert (config_root / "egress-bridge" / "libcairn_egress.so").is_file()
+        assert Path(proxy._unix_path).is_socket()
+        assert (config_root / "egress-bridge" / "host-socket").read_text().strip() == proxy._unix_path
+        assert (config_root / "egress-bridge" / "forward.py").is_file()
         assert "LD_PRELOAD" not in env
-        assert "CAIRN_EGRESS_PROXY" in env
+        assert env["CAIRN_EGRESS_PROXY"] == "127.0.0.1:18081"
+        assert "NO_PROXY" not in env
         # model gateway is admitted as model traffic
         a, _ = proxy.decide(eg.HTTPS, "api.anthropic.com", 443)
         assert a == "proxy_model"

